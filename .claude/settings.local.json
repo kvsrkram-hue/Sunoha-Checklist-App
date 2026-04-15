@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check \"C:/Users/Dell/Documents/Buz Docs/Application development/Checklists/server/google-apps-script.js\")",
+      "Bash(npx vite:*)"
+    ]
+  }
+}
