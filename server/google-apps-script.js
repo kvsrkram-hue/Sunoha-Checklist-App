@@ -52,7 +52,7 @@ var HEADERS = {
   ArchivesMeta: ["id", "date_range_start", "date_range_end", "orders_count", "created_at", "created_by", "order_ids"],
   UntaggedChecklists: ["id", "checklist_id", "checklist_name", "person", "date", "submitted_at", "tagged_order_id", "responses", "remarks", "submitted_by_user_id", "total_quantity", "tagged_quantity", "allocations", "auto_id"],
   InventoryItems: ["id", "category", "name", "unit", "opening_stock", "current_stock", "min_stock_alert", "created_at", "is_active", "abbreviation", "equivalent_items"],
-  InventoryLedger: ["id", "item_id", "item_name", "date", "type", "quantity", "balance_after", "reference_type", "reference_id", "notes", "done_by", "created_at", "question_index"],
+  InventoryLedger: ["id", "item_id", "item_name", "category", "date", "type", "quantity", "balance_after", "reference_type", "reference_id", "notes", "done_by", "created_at", "question_index"],
   InventoryCategories: ["id", "name"],
   IDSequences: ["prefix", "last_sequence"],
   QuantityAllocations: ["id", "source_checklist_id", "source_auto_id", "total_quantity", "destination_type", "destination_id", "destination_auto_id", "allocated_quantity", "allocated_at", "allocated_by"],
@@ -122,6 +122,10 @@ function ensureAllSheetColumnsMigrated() {
     ensureSheetHasAllColumns(SHEETS.QUANTITY_ALLOCATIONS);
     ensureSheetHasAllColumns(SHEETS.BLENDS);
     ensureSheetHasAllColumns(SHEETS.DRAFTS);
+    // After ensuring the InventoryLedger has the new "category" column, backfill
+    // historical rows once per deploy. Idempotent — only updates rows where
+    // category is missing.
+    backfillInventoryLedgerCategories();
   } catch (e) { /* non-fatal */ }
 }
 
@@ -770,6 +774,7 @@ function doGet(e) {
       case "getAuditLog":       var err3 = requireAdmin(user); if (err3) return jsonResponse(err3); return jsonResponse(handleGetAuditLog());
       case "getArchives":       var err4 = requireAdmin(user); if (err4) return jsonResponse(err4); return jsonResponse(handleGetArchives());
       case "getUntagged":       return jsonResponse(handleGetUntagged());
+      case "getUntaggedResponse": return jsonResponse(handleGetUntaggedResponse(e.parameter));
       case "getApprovedEntries": return jsonResponse(handleGetApprovedEntries(e.parameter));
       case "getLinkedEntries":  return jsonResponse(handleGetLinkedEntries(e.parameter));
       case "getInventoryItems": return jsonResponse(handleGetInventoryItems());
@@ -838,6 +843,14 @@ function doPost(e) {
       case "tagChecklistToStage": return jsonResponse(handleTagChecklistToStage(body, user));
       case "untagChecklistFromStage": return jsonResponse(handleUntagChecklistFromStage(body, user));
       case "deliverOrder": return jsonResponse(handleDeliverOrder(body, user));
+      case "fixRoastedBeansTemplateOrder":
+        var eFix = requireAdmin(user); if (eFix) return jsonResponse(eFix);
+        return jsonResponse(handleFixRoastedBeansTemplateOrder(body, user));
+      case "backfillLedgerCategories":
+        var eBf = requireAdmin(user); if (eBf) return jsonResponse(eBf);
+        // Allow manual re-run by clearing the once-per-deploy guard
+        _ledgerCategoryBackfillDone = false;
+        return jsonResponse(backfillInventoryLedgerCategories());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -2248,6 +2261,35 @@ function handleGetUntagged() {
   });
 }
 
+// Fetch a single untagged checklist row by its id. Used by the edit dialog on the
+// dashboard so it can pre-populate fields with the saved responses & remarks.
+// Returns the same shape as a row in handleGetUntagged() plus the parsed batchAllocations
+// when present, so the edit form can re-show batch tags.
+function handleGetUntaggedResponse(params) {
+  var id = (params && (params.id || params.responseId)) || "";
+  if (!id) return { error: "Missing untagged response id" };
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  var rows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var r = null;
+  for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(id)) { r = rows[i]; break; } }
+  if (!r) return { error: "Untagged response not found: " + id };
+  var totalQ = parseFloat(r.total_quantity) || 0;
+  var taggedQ = parseFloat(r.tagged_quantity) || 0;
+  var allocatedFromQA = r.auto_id ? getAllocatedQuantityForAutoId(r.auto_id) : 0;
+  var effectiveTagged = Math.max(taggedQ, allocatedFromQA);
+  return {
+    id: r.id, checklistId: r.checklist_id, checklistName: r.checklist_name,
+    person: r.person, date: r.date, submittedAt: r.submitted_at,
+    taggedOrderId: r.tagged_order_id || "",
+    responses: safeParseJSON(r.responses, []),
+    remarks: safeParseJSON(r.remarks, {}),
+    submittedByUserId: r.submitted_by_user_id || "",
+    totalQuantity: totalQ, taggedQuantity: effectiveTagged, remainingQuantity: totalQ - effectiveTagged,
+    allocations: safeParseJSON(r.allocations, []),
+    autoId: r.auto_id || "",
+  };
+}
+
 function handleSubmitUntagged(body, user) {
   ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
   var checklistId = body.checklistId;
@@ -2806,6 +2848,7 @@ function handleCreateInventoryItem(body, user) {
   if (openingStock > 0) {
     appendToSheet(SHEETS.INVENTORY_LEDGER, {
       id: "led_" + nextId(), item_id: id, item_name: body.name,
+      category: body.category || "",
       date: new Date().toISOString().split("T")[0], type: "IN",
       quantity: openingStock, balance_after: openingStock,
       reference_type: "manual", reference_id: "", notes: "Opening stock",
@@ -2917,7 +2960,9 @@ function handleGetInventoryLedger(params) {
   filtered.sort(function(a, b) { return String(b.created_at).localeCompare(String(a.created_at)); });
   return filtered.map(function(r) {
     return {
-      id: r.id, itemId: r.item_id, itemName: r.item_name, date: r.date,
+      id: r.id, itemId: r.item_id, itemName: r.item_name,
+      category: r.category || "",
+      date: r.date,
       type: r.type, quantity: parseFloat(r.quantity) || 0,
       balanceAfter: parseFloat(r.balance_after) || 0,
       referenceType: r.reference_type, referenceId: r.reference_id,
@@ -2950,6 +2995,7 @@ function handleAddInventoryAdjustment(body, user) {
 
   var ledgerEntry = {
     id: "led_" + nextId(), item_id: itemId, item_name: item.name,
+    category: item.category || "",
     date: body.date || new Date().toISOString().split("T")[0], type: "ADJUSTMENT",
     quantity: (adjType === "OUT" ? -qty : qty), balance_after: newStock,
     reference_type: "manual", reference_id: "",
@@ -3014,12 +3060,70 @@ function createInventoryTransaction(itemId, type, quantity, refType, refId, note
 
   appendToSheet(SHEETS.INVENTORY_LEDGER, {
     id: "led_" + nextId(), item_id: itemId, item_name: item.name,
+    category: item.category || "",
     date: new Date().toISOString().split("T")[0], type: type,
     quantity: (type === "OUT" ? -quantity : quantity), balance_after: newStock,
     reference_type: refType || "manual", reference_id: refId || "",
     notes: notes || "", done_by: doneBy || "", created_at: new Date().toISOString(),
     question_index: (questionIndex === undefined || questionIndex === null || questionIndex === "") ? "" : String(questionIndex),
   });
+}
+
+// Look up an inventory item's category by id. Used to populate the InventoryLedger
+// category column on writes and to backfill historical rows.
+function getInventoryCategoryForItemId(itemId) {
+  if (!itemId) return "";
+  var rows = getRows(SHEETS.INVENTORY_ITEMS);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].id) === String(itemId)) return rows[i].category || "";
+  }
+  return "";
+}
+
+// One-time backfill: populate the "category" column on every InventoryLedger row that
+// currently has it blank. Looks up category from InventoryItems via item_id. Safe to
+// re-run — only writes when the cell is empty and the lookup succeeds. Returns a
+// summary { scanned, updated, missing } so an admin call can see what happened.
+var _ledgerCategoryBackfillDone = false;
+function backfillInventoryLedgerCategories() {
+  if (_ledgerCategoryBackfillDone) return { scanned: 0, updated: 0, missing: 0, skipped: true };
+  _ledgerCategoryBackfillDone = true;
+  var sheet = getSheet(SHEETS.INVENTORY_LEDGER);
+  if (!sheet) return { scanned: 0, updated: 0, missing: 0 };
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { scanned: 0, updated: 0, missing: 0 };
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  var catCol = headers.indexOf("category");
+  var itemIdCol = headers.indexOf("item_id");
+  if (catCol < 0 || itemIdCol < 0) return { scanned: 0, updated: 0, missing: 0 };
+
+  // Build itemId → category lookup once
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var catByItemId = {};
+  for (var ii = 0; ii < items.length; ii++) {
+    catByItemId[String(items[ii].id)] = items[ii].category || "";
+  }
+
+  var range = sheet.getRange(2, 1, lastRow - 1, headers.length);
+  var values = range.getValues();
+  var scanned = 0, updated = 0, missing = 0;
+  for (var r = 0; r < values.length; r++) {
+    scanned++;
+    var existing = String(values[r][catCol] || "").trim();
+    if (existing) continue; // already populated
+    var itemId = String(values[r][itemIdCol] || "").trim();
+    if (!itemId) { missing++; continue; }
+    var cat = catByItemId[itemId];
+    if (!cat) { missing++; continue; }
+    values[r][catCol] = cat;
+    updated++;
+  }
+  if (updated > 0) {
+    range.setValues(values);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+  }
+  Logger.log("backfillInventoryLedgerCategories: scanned=" + scanned + " updated=" + updated + " missing=" + missing);
+  return { scanned: scanned, updated: updated, missing: missing };
 }
 
 // Helper: reverse all inventory ledger entries that were written for a given reference
@@ -4549,6 +4653,107 @@ function setupMasterSummary() {
   for (var w = 1; w <= MASTER_SUMMARY_HEADERS.length; w++) sheet.setColumnWidth(w, 140);
 }
 
+// Canonical question array for the Roasted Beans Quality Check checklist. Defined as a
+// builder function so both the seed-data path and the updateChecklistTemplates()
+// re-seed path use the same source of truth — eliminates the label/index drift that
+// caused "Type of Bean" to display dates and "Date of Roast" to display roast profiles.
+//
+// Field index contract (do not reorder without also updating dependents):
+//   0: Shipment number used     (linkedSource → ck_green_beans)
+//   1: Roast profile            (text)
+//   2: Type of Beans            (inventory_item, autoFill from green beans QC)
+//                                ← inventoryLink fieldIdx targets this position
+//   3: Quantity input           (number, OUT Green Beans via field 2)
+//   4: Quantity output          (number, IN Roasted Beans via field 2 → equivalent_items)
+//   5: Date of Roast            (date) ← autoIdConfig.dateFieldIdx
+//   6: Loss in weight
+//   7: Reason for loss
+//   8: How is the roasted beans stored?
+//   9: Roast Approved?          (approval gate)
+//  10: Remarks
+function ROASTED_BEANS_CANONICAL_QUESTIONS() {
+  return [
+    { text: "Shipment number used", type: "text", linkedSource: { checklistId: "ck_green_beans", type: "approved_only" } },
+    { text: "Roast profile", type: "text" },
+    { text: "Type of Beans", type: "inventory_item", inventoryCategory: "Green Beans", autoFillMapping: { sourceFieldIdx: "1", readOnly: true } },
+    { text: "Quantity input", type: "number",
+      inventoryLink: { enabled: true, txType: "OUT", category: "Green Beans", itemSource: { type: "field", fieldIdx: 2, itemId: "" } } },
+    { text: "Quantity output", type: "number",
+      inventoryLink: { enabled: true, txType: "IN", category: "Roasted Beans", itemSource: { type: "field", fieldIdx: 2, itemId: "" } } },
+    { text: "Date of Roast", type: "date" },
+    { text: "Loss in weight", type: "number" },
+    { text: "Reason for loss", type: "text" },
+    { text: "How is the roasted beans stored?", type: "text" },
+    { text: "Roast Approved?", type: "yesno", isApprovalGate: true },
+    { text: "Remarks", type: "text" },
+  ];
+}
+
+// One-time corrective: re-write the Roasted Beans Quality Check template stored in the
+// Checklists sheet so its question array matches ROASTED_BEANS_CANONICAL_QUESTIONS().
+// This fixes the bug where labels and values were misaligned ("Type of Bean" showing a
+// date, "Date of Roast" showing a roast profile) due to inconsistent template definitions
+// across the codebase.
+//
+// Preservation rules (enforced):
+//   • Existing per-row response data in per-checklist response tabs is NOT modified —
+//     only the template's questions JSON is rewritten.
+//   • Existing inventoryLink / linkedSource / autoFillMapping configs from the canonical
+//     definition are written verbatim.
+//   • Returns a diff summary so admins can verify the change.
+function handleFixRoastedBeansTemplateOrder(body, user) {
+  var ckId = "ck_roasted_beans";
+  var idx = findRowIndex(SHEETS.CHECKLISTS, ckId);
+  if (idx < 0) return { error: "Roasted Beans Quality Check template not found in Checklists sheet" };
+  var rows = getRows(SHEETS.CHECKLISTS);
+  var existing = null;
+  for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === ckId) { existing = rows[i]; break; } }
+  if (!existing) return { error: "Roasted Beans Quality Check template row not found" };
+
+  var oldQuestions = safeParseJSON(existing.questions, []);
+  var oldOrder = oldQuestions.map(function(q) { return q.text || ""; });
+
+  var canonical = ROASTED_BEANS_CANONICAL_QUESTIONS();
+  var canonicalOrder = canonical.map(function(q) { return q.text; });
+
+  // Preserve any custom questions already present in the deployed template that aren't
+  // in the canonical set — append them at the end so no admin-added field is dropped.
+  var canonicalTexts = {};
+  for (var c = 0; c < canonical.length; c++) canonicalTexts[canonical[c].text] = true;
+  for (var o = 0; o < oldQuestions.length; o++) {
+    var qt = oldQuestions[o].text || "";
+    if (qt && !canonicalTexts[qt]) {
+      canonical.push(oldQuestions[o]);
+      canonicalTexts[qt] = true;
+    }
+  }
+
+  existing.questions = JSON.stringify(canonical);
+  // Ensure autoIdConfig points at the right indices for the canonical layout
+  var autoIdCfg = safeParseJSON(existing.auto_id_config, null) || { enabled: true, prefix: "RB" };
+  autoIdCfg.itemCodeFieldIdx = 2;
+  autoIdCfg.dateFieldIdx = 5;
+  if (autoIdCfg.enabled === undefined) autoIdCfg.enabled = true;
+  if (!autoIdCfg.prefix) autoIdCfg.prefix = "RB";
+  existing.auto_id_config = JSON.stringify(autoIdCfg);
+  updateSheetRow(SHEETS.CHECKLISTS, idx, existing);
+  invalidateCache(SHEETS.CHECKLISTS);
+
+  // Refresh the per-checklist response sheet header row so new submissions land in the
+  // right columns. Existing data rows are NOT moved — admins must reconcile historical
+  // rows manually if column positions shifted.
+  try { getOrCreateResponseSheet(existing.name, canonical); } catch (e) { /* non-fatal */ }
+
+  writeAuditLog(user, "fix_template_order", "Checklist", ckId, "Roasted Beans QC question order normalized");
+  return {
+    success: true,
+    checklistId: ckId,
+    oldOrder: oldOrder,
+    newOrder: canonical.map(function(q) { return q.text; }),
+    note: "Template question order has been normalized. Per-checklist response tab headers updated. Historical response rows were not moved — please review manually if old labels/data were misaligned."
+  };
+}
+
 // ─── Update Checklist Templates (run once manually) ──────────
 // Overwrites ALL checklist question configs in the Checklists sheet
 // with the correct linked source, approval gate, and linked ID settings.
@@ -4583,18 +4788,9 @@ function updateChecklistTemplates() {
     },
     "ck_roasted_beans": {
       name: "Roasted Beans Quality Check", subtitle: "Per roast batch", form_url: "",
-      questions: [
-        { text: "Shipment number used", type: "text", linkedSource: { checklistId: "ck_green_beans", type: "approved_only" } },
-        { text: "Type of Bean", type: "text", autoFillMapping: { sourceFieldIdx: "1", readOnly: true } },
-        { text: "Roast profile", type: "text" },
-        { text: "Quantity input", type: "number" },
-        { text: "Quantity output", type: "number" },
-        { text: "Loss in weight", type: "number" },
-        { text: "Reason for loss", type: "text" },
-        { text: "How is the roasted beans stored?", type: "text" },
-        { text: "Roast Approved?", type: "yesno", isApprovalGate: true },
-        { text: "Remarks", type: "text" },
-      ],
+      // Source of truth lives in ROASTED_BEANS_CANONICAL_QUESTIONS() — kept consistent
+      // with the seed-data path so labels and field indices never drift.
+      questions: ROASTED_BEANS_CANONICAL_QUESTIONS(),
     },
     "ck_tagging": {
       name: "Tagging Roasted Beans", subtitle: "Per roast batch tagging", form_url: "",
@@ -4833,21 +5029,8 @@ function seedData() {
         { text: "Remarks", type: "text" },
       ] },
     { id: "ck_roasted_beans", name: "Roasted Beans Quality Check", subtitle: "Per roast batch", form_url: "",
-      autoIdConfig: { enabled: true, prefix: "RB", dateFieldIdx: null, itemCodeFieldIdx: 2 },
-      questions: [
-        { text: "Shipment number used", type: "text", linkedSource: { checklistId: "ck_green_beans", type: "approved_only" } },
-        { text: "Roast profile", type: "text" },
-        { text: "Type of Beans", type: "inventory_item", inventoryCategory: "Green Beans", autoFillMapping: { sourceFieldIdx: "1", readOnly: true } },
-        { text: "Quantity input", type: "number",
-          inventoryLink: { enabled: true, txType: "OUT", category: "Green Beans", itemSource: { type: "field", fieldIdx: 2, itemId: "" } } },
-        { text: "Quantity output", type: "number",
-          inventoryLink: { enabled: true, txType: "IN", category: "Roasted Beans", itemSource: { type: "field", fieldIdx: 2, itemId: "" } } },
-        { text: "Loss in weight", type: "number" },
-        { text: "Reason for loss", type: "text" },
-        { text: "How is the roasted beans stored?", type: "text" },
-        { text: "Roast Approved?", type: "yesno", isApprovalGate: true },
-        { text: "Remarks", type: "text" },
-      ] },
+      autoIdConfig: { enabled: true, prefix: "RB", dateFieldIdx: 5, itemCodeFieldIdx: 2 },
+      questions: ROASTED_BEANS_CANONICAL_QUESTIONS() },
     { id: "ck_tagging", name: "Tagging Roasted Beans", subtitle: "Per roast batch tagging", form_url: "",
       questions: [
         { text: "Roast tag number", type: "text" },
