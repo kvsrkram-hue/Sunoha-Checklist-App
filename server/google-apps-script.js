@@ -1516,6 +1516,164 @@ function getSubmissionByAutoId(autoId, sourceCk) {
   return null;
 }
 
+// Legacy per-checklist inventory routing. Applies the correct IN/OUT split for checklists
+// that do not yet have per-question inventoryLink configs. All lookups go through
+// findInventoryItemForCategory so that Green Beans / Roasted Beans / Packing Items are
+// always separated into the correct category rows via equivalent_items.
+//
+//   • ck_green_beans    : IN  against Green Beans item (resolved from "Type of Beans")
+//   • ck_roasted_beans  : OUT Green Beans (input) + IN Roasted Beans (equivalent of input)
+//   • ck_grinding       : OUT Roasted Beans (resolved from tagged Roast ID's bean type) +
+//                         IN  Packing Items (equivalent of that same bean type)
+//
+// `fallbackInItemId` / `fallbackOutItemId` are only used when the response data doesn't
+// carry enough context to resolve an item directly — preserves the older client payload.
+function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, fallbackInItemId, fallbackOutItemId, isEdit) {
+  if (!ck) return;
+  var suffix = isEdit ? " (edited)" : "";
+
+  if (ck.id === "ck_green_beans") {
+    var qtyReceived = parseFloat(respMap["Quantity received"]) || 0;
+    if (qtyReceived <= 0) return;
+    var gbRef = respMap["Type of Beans"] || fallbackInItemId;
+    var gbResolved = findInventoryItemForCategory(gbRef, "Green Beans");
+    if (gbResolved.item) {
+      var gbNotes = "Green Bean shipment received" + suffix;
+      if (gbResolved.warning) gbNotes = gbResolved.warning + " | " + gbNotes;
+      createInventoryTransaction(gbResolved.item.id, "IN", qtyReceived, refType, refId, gbNotes, person);
+    } else {
+      Logger.log("applyLegacyInventory ck_green_beans: " + (gbResolved.warning || "no item resolved"));
+    }
+    return;
+  }
+
+  if (ck.id === "ck_roasted_beans") {
+    var qtyInput = parseFloat(respMap["Quantity input"]) || 0;
+    var qtyOutput = parseFloat(respMap["Quantity output"]) || 0;
+    // "Type of Beans" is always a Green Beans item. The OUT goes against it, the IN goes
+    // against its Roasted Beans equivalent (separate inventory row in a different category).
+    var beanRef = respMap["Type of Beans"] || fallbackInItemId;
+    if (qtyInput > 0) {
+      var gbOut = findInventoryItemForCategory(beanRef, "Green Beans");
+      if (gbOut.item) {
+        var outNotes = "Used for roasting" + suffix;
+        if (gbOut.warning) outNotes = gbOut.warning + " | " + outNotes;
+        createInventoryTransaction(gbOut.item.id, "OUT", qtyInput, refType, refId, outNotes, person);
+      } else {
+        Logger.log("applyLegacyInventory ck_roasted_beans OUT: " + (gbOut.warning || "no item resolved"));
+      }
+    }
+    if (qtyOutput > 0) {
+      // Prefer an explicit roasted-beans fallback if caller provided one; otherwise resolve
+      // from the bean reference via equivalent_items.
+      var rbIn = fallbackOutItemId
+        ? findInventoryItemForCategory(fallbackOutItemId, "Roasted Beans")
+        : findInventoryItemForCategory(beanRef, "Roasted Beans");
+      if (rbIn.item) {
+        var inNotes = "Roast batch output" + suffix;
+        if (rbIn.warning) inNotes = rbIn.warning + " | " + inNotes;
+        createInventoryTransaction(rbIn.item.id, "IN", qtyOutput, refType, refId, inNotes, person);
+      } else {
+        Logger.log("applyLegacyInventory ck_roasted_beans IN: " + (rbIn.warning || "no item resolved"));
+      }
+    }
+    return;
+  }
+
+  if (ck.id === "ck_grinding") {
+    var qIn = parseFloat(respMap["Quantity input"]) || 0;
+    var qOut = parseFloat(respMap["Quantity output"]) || 0;
+    // Back-compat: older templates only had "Total Net weight". Use it for both sides when
+    // the explicit input/output fields are absent so no production data is silently dropped.
+    var netWeight = parseFloat(respMap["Total Net weight"]) || 0;
+    if (qIn <= 0 && netWeight > 0) qIn = netWeight;
+    if (qOut <= 0 && netWeight > 0) qOut = netWeight;
+
+    // Resolve the underlying bean type. Grinding doesn't carry it directly, so follow the
+    // tagged Roast ID (auto-id of a prior Roasted Beans QC) to its "Type of Beans" field.
+    var roastAutoId = respMap["Roast ID"] || "";
+    var beanRefG = "";
+    if (roastAutoId) {
+      var roastCk = lookupChecklist("ck_roasted_beans");
+      if (roastCk) {
+        var roastSub = findSubmissionByAutoId(roastAutoId, roastCk);
+        if (roastSub && roastSub.responses) {
+          // "Type of Beans" is field index 2 on ck_roasted_beans
+          beanRefG = roastSub.responses[2] || "";
+        }
+      }
+    }
+
+    if (qIn > 0) {
+      // Roasted Beans item = equivalent of the green beans reference (or the roasted item
+      // itself if beanRefG already resolves to a Roasted Beans row).
+      var rbOut = beanRefG
+        ? findInventoryItemForCategory(beanRefG, "Roasted Beans")
+        : (fallbackInItemId ? findInventoryItemForCategory(fallbackInItemId, "Roasted Beans") : { item: null, warning: "No Roast ID or fallback provided" });
+      if (rbOut.item) {
+        var gOutNotes = "Used for grinding" + suffix;
+        if (rbOut.warning) gOutNotes = rbOut.warning + " | " + gOutNotes;
+        createInventoryTransaction(rbOut.item.id, "OUT", qIn, refType, refId, gOutNotes, person);
+      } else {
+        Logger.log("applyLegacyInventory ck_grinding OUT: " + (rbOut.warning || "no item resolved"));
+      }
+    }
+    if (qOut > 0) {
+      var pkIn = beanRefG
+        ? findInventoryItemForCategory(beanRefG, "Packing Items")
+        : (fallbackOutItemId ? findInventoryItemForCategory(fallbackOutItemId, "Packing Items") : { item: null, warning: "No Roast ID or fallback provided" });
+      if (pkIn.item) {
+        var gInNotes = "Packed goods produced" + suffix;
+        if (pkIn.warning) gInNotes = pkIn.warning + " | " + gInNotes;
+        createInventoryTransaction(pkIn.item.id, "IN", qOut, refType, refId, gInNotes, person);
+      } else {
+        Logger.log("applyLegacyInventory ck_grinding IN: " + (pkIn.warning || "no item resolved"));
+      }
+    }
+    return;
+  }
+}
+
+// Resolve an inventory item by reference (id or name), optionally mapped to a target
+// category via the source item's equivalent_items list.
+// Returns { item, isEquivalent, warning }:
+//   • item: the inventory-items row to write the ledger entry against (may be the source
+//     itself if no category mapping is required, or null when nothing resolves).
+//   • isEquivalent: true when the returned item is a different row reached via equivalent_items.
+//   • warning: non-empty string when the lookup could not find a clean match in the target
+//     category — the caller should prepend this to the ledger entry notes so the mismatch
+//     is visible to operators.
+function findInventoryItemForCategory(sourceRef, targetCategory) {
+  if (!sourceRef) return { item: null, warning: "No source inventory reference provided" };
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var srcStr = String(sourceRef).trim();
+  var source = null;
+  for (var i = 0; i < items.length; i++) {
+    if (String(items[i].id) === srcStr || String(items[i].name) === srcStr) {
+      source = items[i]; break;
+    }
+  }
+  if (!source) return { item: null, warning: "Inventory item '" + sourceRef + "' not found" };
+  if (!targetCategory || String(source.category) === String(targetCategory)) {
+    return { item: source, isEquivalent: false, warning: "" };
+  }
+  var eqList = safeParseJSON(source.equivalent_items, []);
+  for (var e = 0; e < eqList.length; e++) {
+    if (String(eqList[e].category) === String(targetCategory) && eqList[e].itemId) {
+      for (var j = 0; j < items.length; j++) {
+        if (String(items[j].id) === String(eqList[e].itemId)) {
+          return { item: items[j], isEquivalent: true, warning: "" };
+        }
+      }
+    }
+  }
+  return {
+    item: source,
+    isEquivalent: false,
+    warning: "[WARN] No '" + targetCategory + "' equivalent linked to '" + source.name + "' — ledger written against source item; stock for " + targetCategory + " needs manual correction"
+  };
+}
+
 // Process per-question inventoryLink configs to create inventory transactions.
 function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, isEdit) {
   if (!checklist) {
@@ -1555,6 +1713,7 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
     if (qty === 0) { Logger.log("  → qty=0, skipping"); continue; }
     var link = q.inventoryLink;
     var itemId = "";
+    var linkWarning = "";
     if (link.itemSource && link.itemSource.type === "fixed") {
       itemId = link.itemSource.itemId || "";
       Logger.log("  → fixed item: " + itemId);
@@ -1562,34 +1721,14 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
       var srcVal = responsesMap[link.itemSource.fieldIdx];
       Logger.log("  → field source idx=" + link.itemSource.fieldIdx + " value=" + srcVal);
       if (srcVal) {
-        var items = getRows(SHEETS.INVENTORY_ITEMS);
-        var resolved = null;
-        for (var k = 0; k < items.length; k++) {
-          if (String(items[k].id) === String(srcVal) || String(items[k].name) === String(srcVal)) {
-            resolved = items[k]; break;
-          }
-        }
-        if (resolved) {
-          // If the link declares a target category and the resolved item is in a different category,
-          // look up an equivalent item in the target category from the resolved item's equivalent_items list.
-          if (link.category && String(resolved.category) !== String(link.category)) {
-            var equiv = safeParseJSON(resolved.equivalent_items, []);
-            var foundEquivId = "";
-            for (var ei = 0; ei < equiv.length; ei++) {
-              if (String(equiv[ei].category) === String(link.category) && equiv[ei].itemId) {
-                foundEquivId = equiv[ei].itemId; break;
-              }
-            }
-            if (foundEquivId) {
-              Logger.log("  → equivalent " + link.category + " resolved to " + foundEquivId);
-              itemId = foundEquivId;
-            } else {
-              Logger.log("  → no equivalent in " + link.category + " for " + resolved.id);
-              itemId = resolved.id; // fall back to the resolved item even if category mismatches
-            }
-          } else {
-            itemId = resolved.id;
-          }
+        var resolved = findInventoryItemForCategory(srcVal, link.category || "");
+        if (resolved.item) {
+          itemId = resolved.item.id;
+          if (resolved.warning) linkWarning = resolved.warning;
+          Logger.log("  → resolved " + (resolved.isEquivalent ? "(via equivalent_items)" : "(direct)") +
+                     " to " + itemId + (linkWarning ? " [" + linkWarning + "]" : ""));
+        } else {
+          Logger.log("  → " + (resolved.warning || "no item resolved"));
         }
       }
     }
@@ -1600,8 +1739,10 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
         Logger.log("  → WARNING: Duplicate inventory entry prevented for refId: " + refId + " (questionIndex=" + i + ", type=" + txType + ")");
         continue;
       }
+      var noteBase = "Auto from " + (q.text || "checklist field");
+      var notes = linkWarning ? (linkWarning + " | " + noteBase) : noteBase;
       Logger.log("  → createInventoryTransaction(" + itemId + ", " + txType + ", " + qty + ")");
-      createInventoryTransaction(itemId, txType, qty, refType || "checklist", refId || "", "Auto from " + (q.text || "checklist field"), doneBy || "", i);
+      createInventoryTransaction(itemId, txType, qty, refType || "checklist", refId || "", notes, doneBy || "", i);
       existingKey[dupKey] = true;
     } else {
       Logger.log("  → no itemId resolved, skipping");
@@ -1747,36 +1888,11 @@ function handleSubmitChecklist(body, user) {
 
   // ── Legacy hard-coded inventory tracking (only for checklists NOT migrated to inventoryLink) ──
   if (!hasInventoryLinkQuestions) {
-    var inventoryItemId = body.inventoryItemId || "";
-    var inventoryOutputItemId = body.inventoryOutputItemId || "";
-    if (inventoryItemId || inventoryOutputItemId) {
-      var respMap = {};
-      for (var ri = 0; ri < responses.length; ri++) {
-        respMap[responses[ri].questionText] = responses[ri].response || "";
-      }
-      // Green Beans QC: IN for green beans
-      if (ck.id === "ck_green_beans" && inventoryItemId) {
-        var qtyReceived = parseFloat(respMap["Quantity received"]) || 0;
-        if (qtyReceived > 0) createInventoryTransaction(inventoryItemId, "IN", qtyReceived, "checklist", ocId, "Green Bean shipment received", person);
-      }
-      // Roasted Beans QC: OUT green beans, IN roasted beans
-      if (ck.id === "ck_roasted_beans") {
-        var qtyInput = parseFloat(respMap["Quantity input"]) || 0;
-        var qtyOutput = parseFloat(respMap["Quantity output"]) || 0;
-        if (inventoryItemId && qtyInput > 0) createInventoryTransaction(inventoryItemId, "OUT", qtyInput, "checklist", ocId, "Used for roasting", person);
-        if (inventoryOutputItemId && qtyOutput > 0) createInventoryTransaction(inventoryOutputItemId, "IN", qtyOutput, "checklist", ocId, "Roast batch output", person);
-      }
-      // Grinding: OUT roasted beans, IN packed goods
-      if (ck.id === "ck_grinding") {
-        var netWeight = parseFloat(respMap["Total Net weight"]) || 0;
-        if (inventoryItemId) {
-          // OUT from roasted beans - use net weight as approximation if no specific field
-          var grindInput = netWeight;
-          if (grindInput > 0) createInventoryTransaction(inventoryItemId, "OUT", grindInput, "checklist", ocId, "Used for grinding/packing", person);
-        }
-        if (inventoryOutputItemId && netWeight > 0) createInventoryTransaction(inventoryOutputItemId, "IN", netWeight, "checklist", ocId, "Packed goods produced", person);
-      }
+    var respMap = {};
+    for (var ri = 0; ri < responses.length; ri++) {
+      respMap[responses[ri].questionText] = responses[ri].response || "";
     }
+    applyLegacyInventoryForChecklist(ck, respMap, "checklist", ocId, person, body.inventoryItemId || "", body.inventoryOutputItemId || "");
   }
 
   writeAuditLog(user, "submit", "Checklist", ocId, ck.name + (autoId ? " [" + autoId + "]" : ""));
@@ -1837,29 +1953,11 @@ function handleEditResponse(body, user) {
   } else {
     // Legacy hard-coded path: reverse prior entries, then re-apply using updated values.
     var reversedCount = reverseInventoryLedgerForRef("checklist", ocId, editPerson);
-    var inventoryItemIdE = body.inventoryItemId || "";
-    var inventoryOutputItemIdE = body.inventoryOutputItemId || "";
-    if (inventoryItemIdE || inventoryOutputItemIdE) {
-      var respMapE = {};
-      for (var riE = 0; riE < newResponses.length; riE++) {
-        respMapE[newResponses[riE].questionText] = newResponses[riE].response || "";
-      }
-      if (ck.id === "ck_green_beans" && inventoryItemIdE) {
-        var qrE = parseFloat(respMapE["Quantity received"]) || 0;
-        if (qrE > 0) createInventoryTransaction(inventoryItemIdE, "IN", qrE, "checklist", ocId, "Green Bean shipment received (edited)", editPerson);
-      }
-      if (ck.id === "ck_roasted_beans") {
-        var qiE = parseFloat(respMapE["Quantity input"]) || 0;
-        var qoE = parseFloat(respMapE["Quantity output"]) || 0;
-        if (inventoryItemIdE && qiE > 0) createInventoryTransaction(inventoryItemIdE, "OUT", qiE, "checklist", ocId, "Used for roasting (edited)", editPerson);
-        if (inventoryOutputItemIdE && qoE > 0) createInventoryTransaction(inventoryOutputItemIdE, "IN", qoE, "checklist", ocId, "Roast batch output (edited)", editPerson);
-      }
-      if (ck.id === "ck_grinding") {
-        var nwE = parseFloat(respMapE["Total Net weight"]) || 0;
-        if (inventoryItemIdE && nwE > 0) createInventoryTransaction(inventoryItemIdE, "OUT", nwE, "checklist", ocId, "Used for grinding (edited)", editPerson);
-        if (inventoryOutputItemIdE && nwE > 0) createInventoryTransaction(inventoryOutputItemIdE, "IN", nwE, "checklist", ocId, "Packed goods produced (edited)", editPerson);
-      }
+    var respMapE = {};
+    for (var riE = 0; riE < newResponses.length; riE++) {
+      respMapE[newResponses[riE].questionText] = newResponses[riE].response || "";
     }
+    applyLegacyInventoryForChecklist(ck, respMapE, "checklist", ocId, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true);
     Logger.log("handleEditResponse: legacy inventory — reversed " + reversedCount + " prior entries");
   }
 
@@ -2245,29 +2343,11 @@ function handleSubmitUntagged(body, user) {
 
   // ── Inventory transactions for untagged submissions (legacy path; only when no inventoryLink) ──
   if (!hasInventoryLinkQuestionsUt) {
-    var inventoryItemId = body.inventoryItemId || "";
-    var inventoryOutputItemId = body.inventoryOutputItemId || "";
-    if (inventoryItemId || inventoryOutputItemId) {
-      var respMap2 = {};
-      for (var ri2 = 0; ri2 < responses.length; ri2++) {
-        respMap2[responses[ri2].questionText] = responses[ri2].response || "";
-      }
-      if (ck.id === "ck_green_beans" && inventoryItemId) {
-        var qr = parseFloat(respMap2["Quantity received"]) || 0;
-        if (qr > 0) createInventoryTransaction(inventoryItemId, "IN", qr, "checklist", id, "Green Bean shipment received", person);
-      }
-      if (ck.id === "ck_roasted_beans") {
-        var qi2 = parseFloat(respMap2["Quantity input"]) || 0;
-        var qo2 = parseFloat(respMap2["Quantity output"]) || 0;
-        if (inventoryItemId && qi2 > 0) createInventoryTransaction(inventoryItemId, "OUT", qi2, "checklist", id, "Used for roasting", person);
-        if (inventoryOutputItemId && qo2 > 0) createInventoryTransaction(inventoryOutputItemId, "IN", qo2, "checklist", id, "Roast batch output", person);
-      }
-      if (ck.id === "ck_grinding") {
-        var nw = parseFloat(respMap2["Total Net weight"]) || 0;
-        if (inventoryItemId && nw > 0) createInventoryTransaction(inventoryItemId, "OUT", nw, "checklist", id, "Used for grinding", person);
-        if (inventoryOutputItemId && nw > 0) createInventoryTransaction(inventoryOutputItemId, "IN", nw, "checklist", id, "Packed goods produced", person);
-      }
+    var respMap2 = {};
+    for (var ri2 = 0; ri2 < responses.length; ri2++) {
+      respMap2[responses[ri2].questionText] = responses[ri2].response || "";
     }
+    applyLegacyInventoryForChecklist(ck, respMap2, "checklist", id, person, body.inventoryItemId || "", body.inventoryOutputItemId || "");
   }
 
   writeAuditLog(user, "submit_untagged", "UntaggedChecklist", id, ck.name + (autoId ? " [" + autoId + "]" : "") + (orderId ? " (tagged to " + orderId + ")" : ""));
@@ -2903,7 +2983,7 @@ function handleGetInventorySummary() {
     var item = items[i];
     if (item.is_active === "false" || item.is_active === false) continue;
     var stock = parseFloat(item.current_stock) || 0;
-    var cat = String(item.category).toLowerCase();
+    var cat = String(item.category || "").trim().toLowerCase();
     if (cat === "green beans") summary.greenBeans += stock;
     else if (cat === "roasted beans") summary.roastedBeans += stock;
     else if (cat === "packing items") summary.packedGoods += stock;
