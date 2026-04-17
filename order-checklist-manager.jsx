@@ -1005,7 +1005,7 @@ export default function App() {
         {currentView==="orders" && <OrdersView orders={orders} checklists={checklists} orderTypes={orderTypes} customers={customers} isAdmin={isAdmin} busy={busy}
           untaggedChecklists={untaggedChecklists} currentUser={currentUser}
           inventoryItems={inventoryItems}
-          drafts={drafts}
+          drafts={drafts} addToast={addToast}
           onEditUntaggedResponse={(ut)=>{setSelected({orderChecklistId:ut.id,checklistId:ut.checklistId,orderId:null,isUntagged:true}); setSubView("editResponses")}}
           onResumeDraft={(d)=>{setResumeDraft(d);setSubView("quickFill")}}
           onDeleteDraft={async(id)=>{
@@ -1449,7 +1449,7 @@ function TagPicker({ ut, checklists, orders, onTagToOrder, onTagToChecklist, onC
   );
 }
 
-function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untaggedChecklists,currentUser,drafts,inventoryItems,onResumeDraft,onDeleteDraft,onTagAllocation,onSelect,onNew,onQuickFill,onTagUntagged,onDeleteOrder,onEditUntaggedResponse}){
+function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untaggedChecklists,currentUser,drafts,inventoryItems,onResumeDraft,onDeleteDraft,onTagAllocation,onSelect,onNew,onQuickFill,onTagUntagged,onDeleteOrder,onEditUntaggedResponse,addToast}){
   const active=orders.filter(o=>o.status!=="delivered");
   const delivered=orders.filter(o=>o.status==="delivered");
   const [tagDropdown,setTagDropdown]=useState(null); // utId
@@ -1458,6 +1458,7 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
   const [expandedGroup,setExpandedGroup]=useState(null);
   const [previewUt,setPreviewUt]=useState(null);
   const [showDelivered,setShowDelivered]=useState(false);
+  const [deleteTarget,setDeleteTarget]=useState(null); // {id,entityType,label}
   const filteredOrders=orders.filter(o=>{const s=tagSearch.toLowerCase();return o.id.toLowerCase().includes(s)||o.name.toLowerCase().includes(s)});
 
   // Group untagged by checklist name
@@ -1512,11 +1513,12 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
                         </>}
                       </div>
                       {(isAdmin||ut.submittedByUserId===currentUser?.id)&&(
-                        tagDropdown===ut.id?
+                        <div style={{display:"flex",gap:4,alignItems:"flex-start",flexShrink:0}}>
+                        {tagDropdown===ut.id?
                           <TagPicker
                             ut={ut}
                             checklists={checklists}
-                            orders={orders}
+                            orders={orders.filter(o=>o.canTag!==false&&o.status!=="delivered"&&o.status!=="cancelled")}
                             onTagToOrder={(orderId,qty)=>{onTagUntagged(ut.id,orderId,qty);setTagDropdown(null)}}
                             onTagToChecklist={async(payload)=>{
                               try{
@@ -1528,7 +1530,9 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
                           />
                         :<Btn small variant="secondary" onClick={()=>setTagDropdown(ut.id)}>
                           <Icon name="link" size={14} color={T.text}/> Tag
-                        </Btn>
+                        </Btn>}
+                        {isAdmin && <button onClick={()=>setDeleteTarget({id:ut.id,entityType:"untagged",label:ut.autoId||ut.id})} title="Delete entry" style={{background:"none",border:"none",cursor:"pointer",padding:6,borderRadius:6,marginTop:2}}><Icon name="trash" size={14} color={T.danger}/></button>}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -1571,6 +1575,9 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
       {previewUt && <UntaggedPreviewModal ut={previewUt} checklists={checklists} inventoryItems={inventoryItems} isAdmin={isAdmin}
         onEdit={(ut)=>{setPreviewUt(null); if(onEditUntaggedResponse) onEditUntaggedResponse(ut);}}
         onClose={()=>setPreviewUt(null)}/>}
+      {deleteTarget && <DeleteConfirmModal entryId={deleteTarget.label||deleteTarget.id} entityType={deleteTarget.entityType}
+        onConfirm={(r)=>{setDeleteTarget(null); if(addToast) addToast("Entry deleted"+(r?.reversed?" and "+r.reversed+" inventory entries reversed":""), "success"); window.location.reload();}}
+        onCancel={()=>setDeleteTarget(null)}/>}
     </div>
   );
 }
@@ -1792,6 +1799,204 @@ function MyAccountModal({ user, onClose, addToast }) {
 
 // ─── Batch Selector (multi-batch tagging with per-batch quantity) ──
 
+// ─── Multi-Batch Roasting Section ────────────────────────────
+
+function RoastBatchSection({ entries, batches, onChange, classifications, onAddClassification, addToast }) {
+  const safeEntries = entries || [];
+  const rows = Array.isArray(batches) && batches.length > 0
+    ? batches
+    : [{ sourceAutoId: "", inputQty: "", outputQty: "", reasonForLoss: "", classificationId: "" }];
+
+  const remainingFor = (entry, currentIdx) => {
+    const baseRemaining = entry.remainingQuantity ?? ((entry.totalQuantity || entry.masterQuantity || 0) - (entry.usedQuantity || entry.allocatedQuantity || 0));
+    const id = entry.autoId || entry.linkedId;
+    let usedInForm = 0;
+    rows.forEach((r, idx) => { if (idx !== currentIdx && r.sourceAutoId === id) usedInForm += parseFloat(r.inputQty) || 0; });
+    return baseRemaining - usedInForm;
+  };
+
+  const updateRow = (i, patch) => {
+    const next = rows.map((r, idx) => idx === i ? { ...r, ...patch } : r);
+    onChange(next);
+  };
+  const removeRow = (i) => { if (rows.length <= 1) return; onChange(rows.filter((_, idx) => idx !== i)); };
+  const addRow = () => {
+    if (rows.length >= 6) return;
+    onChange([...rows, { sourceAutoId: "", inputQty: "", outputQty: "", reasonForLoss: "", classificationId: "" }]);
+  };
+
+  const totalInput = rows.reduce((s, r) => s + (parseFloat(r.inputQty) || 0), 0);
+  const totalOutput = rows.reduce((s, r) => s + (parseFloat(r.outputQty) || 0), 0);
+  const totalLoss = Math.round((totalInput - totalOutput) * 100) / 100;
+  const totalLossPct = totalInput > 0 ? Math.round((totalInput - totalOutput) / totalInput * 1000) / 10 : 0;
+
+  // Inline add classification
+  const [addingClass, setAddingClass] = useState(false);
+  const [newClassName, setNewClassName] = useState("");
+  const [savingClass, setSavingClass] = useState(false);
+  const handleAddClass = async () => {
+    if (!newClassName.trim()) return;
+    setSavingClass(true);
+    try {
+      await onAddClassification(newClassName.trim());
+      setNewClassName(""); setAddingClass(false);
+    } catch (e) { if (addToast) addToast(e.message, "error"); }
+    setSavingClass(false);
+  };
+
+  const roastDegrees = classifications?.roast_degree || [];
+
+  if (safeEntries.length === 0) {
+    return <div style={{padding:"12px 14px",borderRadius:T.radSm,background:T.dangerBg,border:"1px solid rgba(232,93,93,0.2)",color:T.danger,fontSize:13}}>
+      No approved Green Bean QC entries found. Please complete and approve a Green Beans Quality Check first.
+    </div>;
+  }
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{fontSize:13,fontWeight:600,color:T.accent,display:"flex",alignItems:"center",gap:6}}>
+        <Icon name="layers" size={14} color={T.accent}/> Roast Batches
+      </div>
+      {rows.map((row, i) => {
+        const selected = safeEntries.find(e => (e.autoId || e.linkedId) === row.sourceAutoId);
+        const maxQty = selected ? remainingFor(selected, i) : 0;
+        const inputQty = parseFloat(row.inputQty) || 0;
+        const outputQty = parseFloat(row.outputQty) || 0;
+        const loss = inputQty > 0 ? Math.round((inputQty - outputQty) * 100) / 100 : 0;
+        const lossPct = inputQty > 0 ? Math.round((inputQty - outputQty) / inputQty * 1000) / 10 : 0;
+        const inputOverflow = inputQty > maxQty + 0.01 && selected;
+        const outputOverflow = outputQty > inputQty + 0.01;
+        return (
+          <div key={i} style={{background:T.card,borderRadius:T.rad,padding:12,border:`1px solid ${T.border}`,display:"flex",flexDirection:"column",gap:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:600,color:T.textSec}}>Batch {i + 1}</span>
+              {rows.length > 1 && <button onClick={() => removeRow(i)} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><Icon name="x" size={14} color={T.danger}/></button>}
+            </div>
+            {/* Source batch dropdown */}
+            <Field label="Source Green Bean Batch">
+              <select value={row.sourceAutoId} onChange={e => updateRow(i, { sourceAutoId: e.target.value })}
+                style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13}}>
+                <option value="">-- Select batch --</option>
+                {[...safeEntries].sort((a,b)=>{
+                  const af=a.fullyAllocated||(remainingFor(a,i)<=0&&(a.autoId||a.linkedId)!==row.sourceAutoId);
+                  const bf=b.fullyAllocated||(remainingFor(b,i)<=0&&(b.autoId||b.linkedId)!==row.sourceAutoId);
+                  return af&&!bf?1:!af&&bf?-1:0;
+                }).map((e, ei) => {
+                  const id = e.autoId || e.linkedId;
+                  const rem = remainingFor(e, i);
+                  const disabled = (e.fullyAllocated || rem <= 0) && id !== row.sourceAutoId;
+                  return <option key={ei} value={id} disabled={disabled}>{id} — {rem > 0 ? `${Math.round(rem*100)/100}kg available` : "fully allocated"}</option>;
+                })}
+              </select>
+            </Field>
+            {selected && <div style={{fontSize:11,color:T.textMut,marginTop:-4}}>{Math.round(maxQty*100)/100}kg available from this batch</div>}
+            {/* Quantities row */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8}}>
+              <Field label="Input Qty (kg)">
+                <input type="number" min="0" value={row.inputQty} onChange={e => updateRow(i, { inputQty: e.target.value })}
+                  style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${inputOverflow?T.danger:T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
+              </Field>
+              <Field label="Output Qty (kg)">
+                <input type="number" min="0" value={row.outputQty} onChange={e => updateRow(i, { outputQty: e.target.value })}
+                  style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${outputOverflow?T.danger:T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
+              </Field>
+              <Field label="Loss">
+                <div style={{padding:"8px 10px",borderRadius:T.radSm,background:T.surfaceHover,border:`1px solid ${T.border}`,color:T.textMut,fontSize:13}}>{loss > 0 ? loss + " kg" : "--"}</div>
+              </Field>
+              <Field label="Loss %">
+                <div style={{padding:"8px 10px",borderRadius:T.radSm,background:T.surfaceHover,border:`1px solid ${T.border}`,color:loss>0?T.warning:T.textMut,fontSize:13}}>{lossPct > 0 ? lossPct + "%" : "--"}</div>
+              </Field>
+            </div>
+            {inputOverflow && <div style={{fontSize:11,color:T.danger}}>Input exceeds available ({Math.round(maxQty*100)/100}kg)</div>}
+            {outputOverflow && <div style={{fontSize:11,color:T.danger}}>Output cannot exceed input ({inputQty}kg)</div>}
+            {/* Reason for loss */}
+            {loss > 0 && <Field label="Reason for Loss">
+              <input value={row.reasonForLoss || ""} onChange={e => updateRow(i, { reasonForLoss: e.target.value })} placeholder="Reason for weight loss..."
+                style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
+            </Field>}
+            {/* Roast classification */}
+            <Field label="Roast Classification">
+              <div style={{display:"flex",gap:6}}>
+                <select value={row.classificationId || ""} onChange={e => updateRow(i, { classificationId: e.target.value })}
+                  style={{flex:1,padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13}}>
+                  <option value="">-- Select --</option>
+                  {roastDegrees.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                {!addingClass && <button onClick={() => setAddingClass(true)} style={{padding:"6px 10px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>+ New</button>}
+              </div>
+            </Field>
+            {addingClass && (
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <input value={newClassName} onChange={e=>setNewClassName(e.target.value)} placeholder="Classification name..." autoFocus
+                  style={{flex:1,padding:"6px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.accentBorder}`,color:T.text,fontSize:12,outline:"none"}}/>
+                <Btn small onClick={handleAddClass} disabled={savingClass||!newClassName.trim()}>{savingClass?"...":"Save"}</Btn>
+                <Btn small variant="ghost" onClick={()=>{setAddingClass(false);setNewClassName("")}}>Cancel</Btn>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {rows.length < 6 && <Btn variant="ghost" small onClick={addRow}><Icon name="plus" size={12} color={T.textSec}/> Add Another Batch</Btn>}
+
+      {/* Running totals */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,padding:"10px 12px",background:T.accentBg,borderRadius:T.radSm,border:`1px solid ${T.accentBorder}`}}>
+        <div style={{textAlign:"center"}}><div style={{fontSize:11,color:T.textMut}}>Total Input</div><div style={{fontSize:15,fontWeight:600,color:T.text}}>{totalInput} kg</div></div>
+        <div style={{textAlign:"center"}}><div style={{fontSize:11,color:T.textMut}}>Total Output</div><div style={{fontSize:15,fontWeight:600,color:T.success}}>{totalOutput} kg</div></div>
+        <div style={{textAlign:"center"}}><div style={{fontSize:11,color:T.textMut}}>Total Loss</div><div style={{fontSize:15,fontWeight:600,color:totalLoss>0?T.warning:T.textMut}}>{totalLoss} kg ({totalLossPct}%)</div></div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Roast Batch View (read-only table for viewing multi-batch entries) ──
+function RoastBatchTable({ batchesJson, classifications }) {
+  const batches = typeof batchesJson === "string" ? (() => { try { return JSON.parse(batchesJson); } catch(e) { return []; }})() : (Array.isArray(batchesJson) ? batchesJson : []);
+  if (batches.length === 0) return null;
+  const roastDegrees = classifications?.roast_degree || [];
+  const classLabel = (id) => { const c = roastDegrees.find(r => r.id === id); return c ? c.name : ""; };
+  const totalIn = batches.reduce((s, b) => s + (parseFloat(b.inputQty) || 0), 0);
+  const totalOut = batches.reduce((s, b) => s + (parseFloat(b.outputQty) || 0), 0);
+  return (
+    <div style={{overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+        <thead><tr style={{background:T.surfaceHover}}>
+          <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Source</th>
+          <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>In (kg)</th>
+          <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Out (kg)</th>
+          <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Loss</th>
+          <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Loss%</th>
+          <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Classification</th>
+        </tr></thead>
+        <tbody>
+          {batches.map((b, i) => {
+            const inQ = parseFloat(b.inputQty) || 0;
+            const outQ = parseFloat(b.outputQty) || 0;
+            const loss = Math.round((inQ - outQ) * 100) / 100;
+            const pct = inQ > 0 ? Math.round((inQ - outQ) / inQ * 1000) / 10 : 0;
+            return <tr key={i} style={{borderBottom:`1px solid ${T.border}`}}>
+              <td style={{padding:"6px 8px",fontFamily:T.mono,color:T.accent}}>{b.sourceAutoId}</td>
+              <td style={{padding:"6px 8px",textAlign:"right",color:T.text}}>{inQ}</td>
+              <td style={{padding:"6px 8px",textAlign:"right",color:T.success}}>{outQ}</td>
+              <td style={{padding:"6px 8px",textAlign:"right",color:loss>0?T.warning:T.textMut}}>{loss}</td>
+              <td style={{padding:"6px 8px",textAlign:"right",color:loss>0?T.warning:T.textMut}}>{pct}%</td>
+              <td style={{padding:"6px 8px",color:T.textSec}}>{classLabel(b.classificationId)}</td>
+            </tr>;
+          })}
+          <tr style={{background:T.surfaceHover,fontWeight:600}}>
+            <td style={{padding:"6px 8px",color:T.textSec}}>Total</td>
+            <td style={{padding:"6px 8px",textAlign:"right",color:T.text}}>{totalIn}</td>
+            <td style={{padding:"6px 8px",textAlign:"right",color:T.success}}>{totalOut}</td>
+            <td style={{padding:"6px 8px",textAlign:"right",color:T.warning}}>{Math.round((totalIn-totalOut)*100)/100}</td>
+            <td style={{padding:"6px 8px",textAlign:"right",color:T.warning}}>{totalIn>0?Math.round((totalIn-totalOut)/totalIn*1000)/10:0}%</td>
+            <td style={{padding:"6px 8px"}}></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function BatchSelector({ entries, allocations, onChange, checklistName, emptyMessage }) {
   const safeEntries = entries || [];
   const rows = Array.isArray(allocations) && allocations.length > 0 ? allocations : [{ sourceAutoId: "", quantity: "" }];
@@ -1983,6 +2188,8 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   const [submitting,setSubmitting]=useState(false);
   const [savingDraft,setSavingDraft]=useState(false);
   const [invError,setInvError]=useState({idx:null,message:""});
+  const [roastBatches,setRoastBatches]=useState([{sourceAutoId:"",inputQty:"",outputQty:"",reasonForLoss:"",classificationId:""}]);
+  const [classifications,setClassifications]=useState(null);
 
   const ck=checklists.find(c=>c.id===selCkId);
   const nq=ck?normalizeQuestions(ck.questions):[];
@@ -2008,7 +2215,16 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
     return "";
   };
 
-  const orderOptions=[{label:"Untagged (no order)",value:""},...orders.map(o=>({label:`${o.id} — ${o.name}`,value:o.id}))];
+  // Load classifications when ck_roasted_beans is selected
+  useEffect(()=>{
+    if(selCkId==="ck_roasted_beans"&&!classifications){
+      API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+    }
+  },[selCkId]);
+
+  const isMultiBatchRoast = selCkId === "ck_roasted_beans";
+
+  const orderOptions=[{label:"Untagged (no order)",value:""},...orders.filter(o=>o.canTag!==false&&o.status!=="delivered"&&o.status!=="cancelled").map(o=>({label:`${o.id} — ${o.name}`,value:o.id}))];
 
   const handleSubmit=async()=>{
     setSubmitting(true);
@@ -2111,7 +2327,19 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
       }
       return {questionIndex:qi,questionText:q.text,response:resp};
     });
-    await onSubmit({checklistId:selCkId,date:formData.date,person:formData.person,responses,remarks:formData.remarks,orderId:orderId||"",inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{}});
+    const payload = {checklistId:selCkId,date:formData.date,person:formData.person,responses,remarks:formData.remarks,orderId:orderId||"",inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{}};
+    if (isMultiBatchRoast) {
+      // Validate roast batches before submitting
+      const validBatches = roastBatches.filter(b => b.sourceAutoId && (parseFloat(b.inputQty) || 0) > 0);
+      if (validBatches.length === 0) { alert("Please add at least one roast batch with a source and input quantity."); setSubmitting(false); return; }
+      for (let bi = 0; bi < validBatches.length; bi++) {
+        const b = validBatches[bi];
+        if ((parseFloat(b.outputQty)||0) > (parseFloat(b.inputQty)||0)) { alert("Batch "+(bi+1)+": output cannot exceed input."); setSubmitting(false); return; }
+        if ((parseFloat(b.inputQty)||0) - (parseFloat(b.outputQty)||0) > 0 && !(b.reasonForLoss||"").trim()) { alert("Batch "+(bi+1)+": please provide a reason for loss."); setSubmitting(false); return; }
+      }
+      payload.roast_batches = validBatches;
+    }
+    await onSubmit(payload);
     setSubmitting(false);
   };
 
@@ -2220,8 +2448,29 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
           </div>;
         })()}
 
+        {/* ── Multi-batch roasting section (replaces Shipment/Qty fields for ck_roasted_beans) ── */}
+        {isMultiBatchRoast && (
+          <RoastBatchSection
+            entries={approvedEntries?.["ck_green_beans"]||[]}
+            batches={roastBatches}
+            onChange={setRoastBatches}
+            classifications={classifications}
+            onAddClassification={async(name)=>{
+              const r=await API.post("addClassification",{name,type:"roast_degree"});
+              if(r&&!r.error){const d=await API.get("getClassifications");if(d&&!d.error)setClassifications(d);}
+              else throw new Error(r?.error||"Failed");
+            }}
+            addToast={null}
+          />
+        )}
+
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           {nq.map((q,qi)=>{
+            // For multi-batch roast, skip the fields that are now handled by RoastBatchSection
+            if(isMultiBatchRoast){
+              const skipTexts=["Shipment number used","Type of Beans","Quantity input","Quantity output","Loss in weight","Reason for loss"];
+              if(skipTexts.some(t=>q.text===t)||q.linkedSource?.checklistId==="ck_green_beans") return null;
+            }
             let autoVal=null;
             if(q.formula) autoVal=evaluateFormula(q.formula,getFieldValue);
             const currentVal=q.formula
@@ -2246,7 +2495,6 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
                   onInventoryAutoFill={(item)=>{
                     if(!item){setInvItemId("");setInvOutputItemId("");return;}
                     setInvItemId(item.id);
-                    // Try to find equivalent item for output (equivalentItems is [{category, itemId}])
                     const eqL=Array.isArray(item.equivalentItems)?item.equivalentItems:[];
                     if(eqL.length>0){
                       const eqItem=(inventoryItems||[]).find(it=>eqL.some(e=>e.itemId===it.id));
@@ -2255,7 +2503,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
                   }}/>
               </div>
             );
-          })}
+          }).filter(Boolean)}
         </div>
 
         {invError.message && (
@@ -4512,6 +4760,122 @@ function ResponsesLogView({ checklists, inventoryItems, isAdmin, addToast, onEdi
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ─── Delete Confirmation Modal ───────────────────────────────
+
+function DeleteConfirmModal({ entryId, entityType, onConfirm, onCancel }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const handleDelete = async () => {
+    if (!reason.trim()) { setError("Please provide a reason for deletion."); return; }
+    setBusy(true); setError("");
+    try {
+      const r = await API.post("softDeleteChecklist", { id: entryId, entityType, reason: reason.trim() });
+      if (r?.error) { setError(r.error); setBusy(false); return; }
+      onConfirm(r);
+    } catch (e) { setError(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:999,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}} onClick={onCancel}>
+      <div style={{background:T.card,borderRadius:T.rad,padding:20,maxWidth:420,width:"100%",border:`1px solid ${T.border}`}} onClick={e=>e.stopPropagation()}>
+        <h3 style={{fontSize:16,fontWeight:600,color:T.danger,marginBottom:8}}>Delete {entryId}?</h3>
+        <p style={{fontSize:13,color:T.textSec,marginBottom:12}}>This action cannot be undone from the main app. All inventory movements from this entry will be reversed.</p>
+        {error && <div style={{background:T.dangerBg,border:"1px solid rgba(232,93,93,0.25)",borderRadius:T.radSm,padding:"8px 12px",marginBottom:10}}><span style={{fontSize:12,color:T.danger}}>{error}</span></div>}
+        <Field label="Reason for deletion (required)">
+          <textarea value={reason} onChange={e=>setReason(e.target.value)} placeholder="Why is this being deleted?" rows={2}
+            style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13,outline:"none",resize:"vertical",fontFamily:"inherit"}}/>
+        </Field>
+        <div style={{display:"flex",gap:8,marginTop:12}}>
+          <Btn variant="secondary" onClick={onCancel} style={{flex:1}} disabled={busy}>Cancel</Btn>
+          <Btn variant="danger" onClick={handleDelete} disabled={busy||!reason.trim()} style={{flex:1,background:T.danger,color:"#fff"}}>{busy?"Deleting...":"Delete"}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Audit Log Viewer (used in Settings) ─────────────────────
+
+function AuditLogSection() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [filterAction, setFilterAction] = useState("");
+  const [filterSearch, setFilterSearch] = useState("");
+  const [expandedId, setExpandedId] = useState(null);
+
+  const load = (off, append) => {
+    setLoading(true);
+    const params = { offset: String(off), limit: "50" };
+    if (filterAction) params.action = filterAction;
+    if (filterSearch) params.entityId = filterSearch;
+    API.get("getAuditLog", params).then(data => {
+      if (data && !data.error) {
+        setEntries(prev => append ? [...prev, ...(data.entries || [])] : (data.entries || []));
+        setTotal(data.total || 0);
+        setHasMore(data.hasMore || false);
+      }
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  };
+
+  useEffect(() => { setOffset(0); load(0, false); }, [filterAction, filterSearch]);
+
+  const actionColors = { delete: T.danger, edit: T.warning, edit_response: T.warning, submit: T.success, tag: T.success, create: T.info, deactivate: T.textMut, revert: T.danger };
+
+  return (
+    <div>
+      <Section icon="clipboard">Audit Log</Section>
+      <p style={{fontSize:12,color:T.textMut,marginTop:-10,marginBottom:12}}>Activity log for all checklist, inventory, and admin actions.</p>
+      <div style={{display:"flex",gap:8,marginBottom:12}}>
+        <select value={filterAction} onChange={e=>{setFilterAction(e.target.value)}}
+          style={{padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:12}}>
+          <option value="">All Actions</option>
+          <option value="submit">Submit</option>
+          <option value="edit">Edit</option>
+          <option value="edit_response">Edit Response</option>
+          <option value="delete">Delete</option>
+          <option value="tag">Tag</option>
+          <option value="create">Create</option>
+          <option value="revert">Revert</option>
+        </select>
+        <input value={filterSearch} onChange={e=>setFilterSearch(e.target.value)} placeholder="Search by entry ID..."
+          style={{flex:1,padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:12,outline:"none"}}/>
+      </div>
+      {loading && entries.length === 0 ? <p style={{fontSize:12,color:T.textMut,textAlign:"center",padding:20}}>Loading audit log...</p> : (
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {entries.length === 0 && <p style={{fontSize:12,color:T.textMut,textAlign:"center",padding:20}}>No entries found.</p>}
+          {entries.map(e => (
+            <div key={e.id} style={{background:T.card,borderRadius:T.radSm,border:`1px solid ${T.border}`,overflow:"hidden"}}>
+              <button onClick={()=>setExpandedId(expandedId===e.id?null:e.id)}
+                style={{width:"100%",padding:"8px 12px",background:"none",border:"none",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:10,fontFamily:T.mono,color:T.textMut,minWidth:60}}>{e.timestamp?new Date(e.timestamp).toLocaleDateString("en-US",{month:"short",day:"numeric"}):""}</span>
+                <Badge variant="muted" style={{background:actionColors[e.action]?actionColors[e.action]+"20":"transparent",color:actionColors[e.action]||T.textSec,fontSize:10}}>{e.action}</Badge>
+                <span style={{fontSize:12,fontFamily:T.mono,color:T.accent,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.entityId}</span>
+                <span style={{fontSize:11,color:T.textMut}}>{e.performedBy}</span>
+              </button>
+              {expandedId === e.id && (
+                <div style={{padding:"8px 12px",background:T.bg,borderTop:`1px solid ${T.border}`,fontSize:12}}>
+                  <div style={{color:T.textMut,marginBottom:4}}>
+                    <b>Time:</b> {e.timestamp ? new Date(e.timestamp).toLocaleString() : "—"}
+                  </div>
+                  <div style={{color:T.textMut,marginBottom:4}}><b>Type:</b> {e.entityType}</div>
+                  {e.details && <div style={{color:T.textSec,whiteSpace:"pre-wrap",fontFamily:T.mono,fontSize:11,maxHeight:200,overflowY:"auto",background:T.surfaceHover,padding:8,borderRadius:T.radSm,marginTop:4}}>{e.details}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+          {hasMore && <Btn variant="ghost" small onClick={()=>{const no=offset+50;setOffset(no);load(no,true)}} disabled={loading}>{loading?"Loading...":"Load More"}</Btn>}
+          {total > 0 && <p style={{fontSize:11,color:T.textMut,textAlign:"center"}}>Showing {entries.length} of {total}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Classifications Management (used in Settings) ────���──────
 
 function ClassificationsSection({ addToast }) {
@@ -4812,6 +5176,9 @@ function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEdi
 
       {/* ── Roast & Grind Classifications (Admin only) ── */}
       {isAdmin && <ClassificationsSection addToast={addToast}/>}
+
+      {/* ── Audit Log (Admin only) ── */}
+      {isAdmin && <AuditLogSection/>}
 
       {/* ── Data Archiving (Admin only) ── */}
       {isAdmin && <div>

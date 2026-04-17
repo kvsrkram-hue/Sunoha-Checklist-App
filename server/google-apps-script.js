@@ -774,7 +774,7 @@ function doGet(e) {
       case "getResponses":      return jsonResponse(handleGetResponses(e.parameter));
       case "getUsers":          var err1 = requireAdmin(user); if (err1) return jsonResponse(err1); return jsonResponse(handleGetUsers());
       case "getAllResponses":   return jsonResponse(handleGetAllResponses());
-      case "getAuditLog":       var err3 = requireAdmin(user); if (err3) return jsonResponse(err3); return jsonResponse(handleGetAuditLog());
+      case "getAuditLog":       var err3 = requireAdmin(user); if (err3) return jsonResponse(err3); return jsonResponse(handleGetAuditLog(e.parameter));
       case "getArchives":       var err4 = requireAdmin(user); if (err4) return jsonResponse(err4); return jsonResponse(handleGetArchives());
       case "getUntagged":       return jsonResponse(handleGetUntagged());
       case "getUntaggedResponse": return jsonResponse(handleGetUntaggedResponse(e.parameter));
@@ -1862,6 +1862,107 @@ function processQuantityAllocationsForSubmission(checklist, responsesMap, batchA
   return { ok: true };
 }
 
+// ─── Multi-Batch Roasting Helper ─────────────────────────────
+
+// Validate and process an array of roast batch objects for ck_roasted_beans.
+// Each batch: { sourceAutoId, inputQty, outputQty, reasonForLoss, classificationId }
+// Returns { ok, error, processed[] } where processed has resolved item ids for inventory writes.
+function validateRoastBatches(batches, excludeDestAutoId) {
+  if (!Array.isArray(batches) || batches.length === 0) return { ok: false, error: "No roast batches provided" };
+  if (batches.length > 6) return { ok: false, error: "Maximum 6 batches allowed" };
+  var greenBeanCk = lookupChecklist("ck_green_beans");
+  if (!greenBeanCk) return { ok: false, error: "Green Bean QC template not found" };
+  var processed = [];
+  var pendingBySource = {};
+  for (var i = 0; i < batches.length; i++) {
+    var b = batches[i];
+    var srcAutoId = String(b.sourceAutoId || "").trim();
+    var inputQty = parseFloat(b.inputQty) || 0;
+    var outputQty = parseFloat(b.outputQty) || 0;
+    if (!srcAutoId) return { ok: false, error: "Batch " + (i + 1) + ": missing source batch" };
+    if (inputQty <= 0) return { ok: false, error: "Batch " + (i + 1) + ": input quantity must be > 0" };
+    if (outputQty < 0) return { ok: false, error: "Batch " + (i + 1) + ": output quantity cannot be negative" };
+    if (outputQty > inputQty) return { ok: false, error: "Batch " + (i + 1) + ": output (" + outputQty + ") cannot exceed input (" + inputQty + ")" };
+    // Check remaining qty of source green bean batch
+    var srcInfo = getSubmissionByAutoId(srcAutoId, greenBeanCk);
+    if (!srcInfo) return { ok: false, error: "Batch " + (i + 1) + ": source batch " + srcAutoId + " not found" };
+    var srcTotal = srcInfo.totalQuantity || 0;
+    var alreadyAllocated = getAllocatedQuantityForAutoId(srcAutoId, excludeDestAutoId || "");
+    var pendingHere = pendingBySource[srcAutoId] || 0;
+    var remaining = srcTotal - alreadyAllocated - pendingHere;
+    if (inputQty > remaining + 0.01) {
+      return { ok: false, error: "Batch " + (i + 1) + ": cannot use " + inputQty + "kg from " + srcAutoId + " — only " + Math.round(remaining * 100) / 100 + "kg available" };
+    }
+    pendingBySource[srcAutoId] = pendingHere + inputQty;
+    // Resolve the green bean inventory item from the source submission's "Type of Beans" field
+    var beanRef = srcInfo.responses ? (srcInfo.responses[1] || srcInfo.responses["1"] || "") : "";
+    var gbItem = findInventoryItemForCategory(beanRef, "Green Beans");
+    var rbItem = findInventoryItemForCategory(beanRef, "Roasted Beans");
+    processed.push({
+      sourceAutoId: srcAutoId,
+      inputQty: inputQty,
+      outputQty: outputQty,
+      lossQty: Math.round((inputQty - outputQty) * 100) / 100,
+      lossPercent: inputQty > 0 ? Math.round((inputQty - outputQty) / inputQty * 1000) / 10 : 0,
+      reasonForLoss: b.reasonForLoss || "",
+      classificationId: b.classificationId || "",
+      greenBeanItemId: gbItem.item ? gbItem.item.id : "",
+      greenBeanWarning: gbItem.warning || "",
+      roastedBeanItemId: rbItem.item ? rbItem.item.id : "",
+      roastedBeanWarning: rbItem.warning || "",
+      beanRef: beanRef,
+    });
+  }
+  return { ok: true, processed: processed };
+}
+
+// Apply inventory writes for validated roast batches. Called after validation passes.
+function applyRoastBatchInventory(processed, refType, refId, person) {
+  for (var i = 0; i < processed.length; i++) {
+    var p = processed[i];
+    if (p.greenBeanItemId && p.inputQty > 0) {
+      var outNotes = "Roast batch " + (i + 1) + ": " + p.inputQty + "kg from " + p.sourceAutoId;
+      if (p.greenBeanWarning) outNotes = p.greenBeanWarning + " | " + outNotes;
+      createInventoryTransaction(p.greenBeanItemId, "OUT", p.inputQty, refType, refId, outNotes, person, "rb_" + i + "_out");
+    }
+    if (p.roastedBeanItemId && p.outputQty > 0) {
+      var inNotes = "Roast batch " + (i + 1) + ": " + p.outputQty + "kg output" + (p.classificationId ? " [" + lookupClassificationLabel(p.classificationId) + "]" : "");
+      if (p.roastedBeanWarning) inNotes = p.roastedBeanWarning + " | " + inNotes;
+      createInventoryTransaction(p.roastedBeanItemId, "IN", p.outputQty, refType, refId, inNotes, person, "rb_" + i + "_in", p.classificationId);
+    }
+  }
+}
+
+// Write QuantityAllocation rows to track green bean usage by roast batches.
+function applyRoastBatchAllocations(processed, destAutoId, destType, destId, allocatedBy) {
+  var greenBeanCk = lookupChecklist("ck_green_beans");
+  if (!greenBeanCk) return;
+  for (var i = 0; i < processed.length; i++) {
+    var p = processed[i];
+    var srcInfo = getSubmissionByAutoId(p.sourceAutoId, greenBeanCk);
+    var srcTotal = srcInfo ? srcInfo.totalQuantity : 0;
+    createQuantityAllocation(greenBeanCk.id, p.sourceAutoId, srcTotal, destType, destId, destAutoId, p.inputQty, allocatedBy);
+  }
+}
+
+// Build auto-id for multi-batch roast: RB-DDMMYY-[ABBR|MIX]-NNN
+function buildRoastAutoId(processed, dateStr) {
+  var prefix = "RB";
+  var dateFormatted = formatDateDDMMYY(dateStr || new Date());
+  var itemCode = "X";
+  if (processed.length > 0) {
+    var firstRef = processed[0].beanRef;
+    var ab = getInventoryAbbreviation(firstRef);
+    itemCode = ab || sanitizeItemCodeToken(firstRef) || "X";
+    if (processed.length > 1) {
+      var allSame = processed.every(function(p) { return p.beanRef === firstRef; });
+      if (!allSame) itemCode = itemCode + "MIX";
+    }
+  }
+  var seq = getNextSequenceForPrefix(prefix);
+  return prefix + "-" + dateFormatted + "-" + itemCode + "-" + String(seq).padStart(3, "0");
+}
+
 // ─── Submit Checklist & Responses ──────────────────────────────
 
 function handleSubmitChecklist(body, user) {
@@ -1922,6 +2023,43 @@ function handleSubmitChecklist(body, user) {
     orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
     orderType: orderTypeLabel, checklistName: ck.name, person: person, date: date, submittedAt: now,
   });
+
+  // ── Multi-batch roasting path (ck_roasted_beans with roast_batches array) ──
+  var roastBatches = body.roast_batches || null;
+  if (ck.id === "ck_roasted_beans" && Array.isArray(roastBatches) && roastBatches.length > 0) {
+    var rbValidation = validateRoastBatches(roastBatches, oc.auto_id || "");
+    if (!rbValidation.ok) return { error: rbValidation.error };
+    // Override autoId with multi-batch aware format
+    autoId = buildRoastAutoId(rbValidation.processed, date || now);
+    oc.auto_id = autoId;
+    updateSheetRow(SHEETS.ORDER_CHECKLISTS, ocIdx, oc);
+    // Store roast_batches JSON in the responses under a synthetic key
+    var batchesJson = JSON.stringify(roastBatches);
+    // Inject into response array so it persists in the per-checklist response sheet
+    var batchRespIdx = -1;
+    for (var bri = 0; bri < respArray.length; bri++) {
+      if (responses[bri] && responses[bri].questionText === "roast_batches") { batchRespIdx = bri; break; }
+    }
+    if (batchRespIdx < 0) respArray.push(batchesJson);
+    // Re-write response row to include batches
+    deleteResponseRow(ck.name, String(oc.order_id));
+    writeResponseRow(ck.name, ck.questions, {
+      orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
+      person: person, date: date, submittedAt: now, responses: respArray, remarks: remarks,
+    });
+    // Apply inventory per-batch
+    applyRoastBatchInventory(rbValidation.processed, "checklist", ocId, person);
+    // Write quantity allocations per-batch
+    if (autoId) applyRoastBatchAllocations(rbValidation.processed, autoId, "checklist", ocId, person);
+    // Audit log per batch
+    for (var bi = 0; bi < rbValidation.processed.length; bi++) {
+      var bp = rbValidation.processed[bi];
+      writeAuditLog(user, "tag", "roast_batch_link", ocId,
+        "Batch " + (bi + 1) + ": Input " + bp.inputQty + "kg from " + bp.sourceAutoId + " → Output " + bp.outputQty + "kg" + (bp.classificationId ? " [" + lookupClassificationLabel(bp.classificationId) + "]" : ""));
+    }
+    writeAuditLog(user, "submit", "Checklist", ocId, ck.name + " [" + autoId + "] (" + rbValidation.processed.length + " batches)");
+    return { success: true, autoId: autoId };
+  }
 
   // ── Inventory processing: new inventoryLink system takes precedence over legacy ──
   // If any question on this checklist has inventoryLink.enabled, we ONLY run the new
@@ -2000,13 +2138,40 @@ function handleEditResponse(body, user) {
     person: newPerson || oc.completed_by, date: newDate || oc.work_date, submittedAt: oc.completed_at,
   });
 
+  // ── Multi-batch roasting edit path ──
+  var editRoastBatches = body.roast_batches || null;
+  var editPerson = newPerson || oc.completed_by;
+  if (ck.id === "ck_roasted_beans" && Array.isArray(editRoastBatches) && editRoastBatches.length > 0) {
+    // Reverse all prior inventory + allocations
+    reverseInventoryLedgerForRef("checklist", ocId, editPerson);
+    if (oc.auto_id) reverseAllocationsForDestination(oc.auto_id);
+    // Capture before state for audit
+    var beforeBatches = "";
+    try {
+      for (var ebi = 0; ebi < newResponses.length; ebi++) {
+        if (newResponses[ebi].questionText === "roast_batches") { beforeBatches = newResponses[ebi].response || ""; break; }
+      }
+    } catch(e) {}
+    // Validate and apply new batches
+    var editRbVal = validateRoastBatches(editRoastBatches, oc.auto_id || "");
+    if (!editRbVal.ok) return { error: editRbVal.error };
+    applyRoastBatchInventory(editRbVal.processed, "checklist", ocId, editPerson);
+    if (oc.auto_id) applyRoastBatchAllocations(editRbVal.processed, oc.auto_id, "checklist", ocId, editPerson);
+    writeAuditLog(user, "edit", "ChecklistResponse", ocId,
+      "Roast batches edited | before=" + beforeBatches + " | after=" + JSON.stringify(editRoastBatches));
+    var refWarning = "";
+    try { if (oc.auto_id) { var refs = findUpstreamReferencesForAutoId(oc.auto_id); if (refs.length > 0) refWarning = "Referenced by: " + refs.join(", "); } } catch(e) {}
+    var result = { success: true };
+    if (refWarning) result.warning = refWarning;
+    return result;
+  }
+
   // ── Inventory re-processing for edit ─────────────────────────
   // Reverse prior ledger entries for this OC, then re-apply based on the updated responses.
   // This prevents accumulation of inventory entries on every edit.
   var editResponsesMap = responsesArrayToMap(newResponses);
   var nqForInvEdit = (ck && ck.questions) || [];
   var hasInventoryLinkQuestionsEdit = nqForInvEdit.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
-  var editPerson = newPerson || oc.completed_by;
 
   if (hasInventoryLinkQuestionsEdit) {
     reverseInventoryLedgerForRef("checklist", ocId, editPerson);
@@ -2168,10 +2333,40 @@ function handleGetAllResponses() {
   return result;
 }
 
-function handleGetAuditLog() {
+function handleGetAuditLog(params) {
+  params = params || {};
   var rows = getRows(SHEETS.AUDIT_LOG);
-  rows.sort(function(a, b) { return String(b.timestamp).localeCompare(String(a.timestamp)); });
-  return rows.slice(0, 200);
+  // Apply optional filters
+  var filtered = rows.filter(function(r) {
+    if (params.action && String(r.action) !== String(params.action)) return false;
+    if (params.entityType && String(r.entity_type) !== String(params.entityType)) return false;
+    if (params.entityId && String(r.entity_id).indexOf(String(params.entityId)) < 0) return false;
+    if (params.performedBy && String(r.user_name || "").toLowerCase().indexOf(String(params.performedBy).toLowerCase()) < 0) return false;
+    if (params.dateFrom) {
+      var ts = String(r.timestamp || "").split("T")[0];
+      if (ts < String(params.dateFrom)) return false;
+    }
+    if (params.dateTo) {
+      var ts2 = String(r.timestamp || "").split("T")[0];
+      if (ts2 > String(params.dateTo)) return false;
+    }
+    return true;
+  });
+  filtered.sort(function(a, b) { return String(b.timestamp).localeCompare(String(a.timestamp)); });
+  var offset = parseInt(params.offset) || 0;
+  var limit = Math.min(parseInt(params.limit) || 50, 100);
+  var page = filtered.slice(offset, offset + limit);
+  return {
+    entries: page.map(function(r) {
+      return {
+        id: r.id, timestamp: r.timestamp, action: r.action,
+        entityType: r.entity_type, entityId: r.entity_id,
+        performedBy: r.user_name || "", details: r.details || "",
+      };
+    }),
+    total: filtered.length,
+    hasMore: (offset + limit) < filtered.length,
+  };
 }
 
 // ─── Archiving ─────────────────────────────────────────────────
