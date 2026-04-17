@@ -32,6 +32,7 @@ var SHEETS = {
   QUANTITY_ALLOCATIONS: "QuantityAllocations",
   BLENDS: "Blends",
   DRAFTS: "Drafts",
+  ROAST_CLASSIFICATIONS: "RoastClassifications",
 };
 
 // ─── Headers for standard sheets ──────────────────────────────
@@ -50,14 +51,15 @@ var HEADERS = {
   ArchivedOrderChecklists: ["id", "order_id", "checklist_id", "status", "completed_at", "completed_by", "work_date", "archive_id"],
   ArchivedResponses: ["archive_id", "order_id", "order_name", "customer", "checklist_name", "person", "date", "question", "response", "remark", "submitted_at"],
   ArchivesMeta: ["id", "date_range_start", "date_range_end", "orders_count", "created_at", "created_by", "order_ids"],
-  UntaggedChecklists: ["id", "checklist_id", "checklist_name", "person", "date", "submitted_at", "tagged_order_id", "responses", "remarks", "submitted_by_user_id", "total_quantity", "tagged_quantity", "allocations", "auto_id"],
-  InventoryItems: ["id", "category", "name", "unit", "opening_stock", "current_stock", "min_stock_alert", "created_at", "is_active", "abbreviation", "equivalent_items"],
-  InventoryLedger: ["id", "item_id", "item_name", "category", "date", "type", "quantity", "balance_after", "reference_type", "reference_id", "notes", "done_by", "created_at", "question_index"],
+  UntaggedChecklists: ["id", "checklist_id", "checklist_name", "person", "date", "submitted_at", "tagged_order_id", "responses", "remarks", "submitted_by_user_id", "total_quantity", "tagged_quantity", "allocations", "auto_id", "is_deleted"],
+  InventoryItems: ["id", "category", "name", "unit", "opening_stock", "current_stock", "min_stock_alert", "created_at", "is_active", "abbreviation", "equivalent_items", "classification_id"],
+  InventoryLedger: ["id", "item_id", "item_name", "category", "date", "type", "quantity", "balance_after", "reference_type", "reference_id", "notes", "done_by", "created_at", "question_index", "classification_id"],
   InventoryCategories: ["id", "name"],
   IDSequences: ["prefix", "last_sequence"],
   QuantityAllocations: ["id", "source_checklist_id", "source_auto_id", "total_quantity", "destination_type", "destination_id", "destination_auto_id", "allocated_quantity", "allocated_at", "allocated_by"],
   Blends: ["id", "name", "customer", "description", "components", "is_active", "created_at"],
   Drafts: ["id", "checklist_id", "checklist_name", "user_id", "user_name", "responses", "linked_sources", "linked_orders", "remarks", "batch_allocations", "person", "work_date", "created_at", "updated_at"],
+  RoastClassifications: ["id", "name", "type", "description", "created_by", "created_at", "updated_at", "is_active"],
 };
 
 // Common columns for per-checklist response tabs (Row 2 headers, data starts Row 3)
@@ -122,6 +124,7 @@ function ensureAllSheetColumnsMigrated() {
     ensureSheetHasAllColumns(SHEETS.QUANTITY_ALLOCATIONS);
     ensureSheetHasAllColumns(SHEETS.BLENDS);
     ensureSheetHasAllColumns(SHEETS.DRAFTS);
+    ensureSheetHasAllColumns(SHEETS.ROAST_CLASSIFICATIONS);
     // After ensuring the InventoryLedger has the new "category" column, backfill
     // historical rows once per deploy. Idempotent — only updates rows where
     // category is missing.
@@ -783,6 +786,7 @@ function doGet(e) {
       case "getInventorySummary": return jsonResponse(handleGetInventorySummary());
       case "getBlends":         return jsonResponse(handleGetBlends(e.parameter));
       case "getDrafts":         return jsonResponse(handleGetDrafts(e.parameter, user));
+      case "getClassifications": return jsonResponse(handleGetClassifications());
       case "getResponseChain": return jsonResponse(handleGetResponseChain(e.parameter));
       case "response-chain":   return jsonResponse(handleGetResponseChain(e.parameter));
       case "getOrderStageTemplates": return jsonResponse(getOrderStageTemplatesConfig());
@@ -843,6 +847,17 @@ function doPost(e) {
       case "tagChecklistToStage": return jsonResponse(handleTagChecklistToStage(body, user));
       case "untagChecklistFromStage": return jsonResponse(handleUntagChecklistFromStage(body, user));
       case "deliverOrder": return jsonResponse(handleDeliverOrder(body, user));
+      case "editUntaggedResponse": return jsonResponse(handleEditUntaggedResponse(body, user));
+      case "softDeleteChecklist": return jsonResponse(handleSoftDeleteChecklist(body, user));
+      case "addClassification":
+        var eC1 = requireAdmin(user); if (eC1) return jsonResponse(eC1);
+        return jsonResponse(handleAddClassification(body, user));
+      case "editClassification":
+        var eC2 = requireAdmin(user); if (eC2) return jsonResponse(eC2);
+        return jsonResponse(handleEditClassification(body, user));
+      case "deactivateClassification":
+        var eC3 = requireAdmin(user); if (eC3) return jsonResponse(eC3);
+        return jsonResponse(handleDeactivateClassification(body, user));
       case "fixRoastedBeansTemplateOrder":
         var eFix = requireAdmin(user); if (eFix) return jsonResponse(eFix);
         return jsonResponse(handleFixRoastedBeansTemplateOrder(body, user));
@@ -876,6 +891,7 @@ function handleInit(user) {
     drafts: user ? handleGetDrafts({}, user) : [],
     orderTypeRequirements: getOrderTypeRequirementsConfig(),
     orderStageTemplates: getOrderStageTemplatesConfig(),
+    classifications: handleGetClassifications(),
   };
 }
 
@@ -1234,11 +1250,13 @@ function formatOrder(o, ocs) {
   var rawStatus = o.status || "active";
   // Backward compat: treat "active" as "beans_not_roasted"
   var orderStatus = rawStatus === "active" ? "beans_not_roasted" : rawStatus;
+  // Phase 6 Fix 2: canTag flag — frontend should use this to filter "Tag to Order" dropdowns
+  var canTag = (orderStatus !== "delivered" && orderStatus !== "cancelled");
   return {
     id: o.id, name: o.name, customerId: o.customer_id, assignedTo: o.assigned_to || "",
     orderType: o.order_type, createdAt: o.created_at,
     invoiceSo: o.invoice_so || "", orderTypeDetail: o.order_type_detail || "",
-    status: orderStatus,
+    status: orderStatus, canTag: canTag,
     orderLines: safeParseJSON(o.order_lines, []),
     productType: o.product_type || "",
     missingChecklistReasons: safeParseJSON(o.missing_checklist_reasons, {}),
@@ -1545,10 +1563,34 @@ function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, f
   if (!ck) return;
   var suffix = isEdit ? " (edited)" : "";
 
+  // Helper: read a value from respMap by question text. Falls back to searching by
+  // question index if the caller built the map from questionIndex keys (which happens
+  // when the response payload uses index-keyed format). This fixes the "qty=0" bug.
+  function readField(fieldName) {
+    if (respMap[fieldName] !== undefined && respMap[fieldName] !== "") return respMap[fieldName];
+    // Fall back: scan ck.questions for the matching text and try by index
+    if (ck && ck.questions) {
+      for (var fi = 0; fi < ck.questions.length; fi++) {
+        if (ck.questions[fi].text === fieldName && respMap[fi] !== undefined && respMap[fi] !== "") {
+          return respMap[fi];
+        }
+      }
+    }
+    return respMap[fieldName] || "";
+  }
+  function readQty(fieldName) {
+    var raw = readField(fieldName);
+    var v = parseFloat(raw);
+    if (isNaN(v) || v === 0) {
+      Logger.log("applyLegacyInventory readQty('" + fieldName + "'): raw='" + raw + "' parsed=" + v);
+    }
+    return isNaN(v) ? 0 : v;
+  }
+
   if (ck.id === "ck_green_beans") {
-    var qtyReceived = parseFloat(respMap["Quantity received"]) || 0;
+    var qtyReceived = readQty("Quantity received");
     if (qtyReceived <= 0) return;
-    var gbRef = respMap["Type of Beans"] || fallbackInItemId;
+    var gbRef = readField("Type of Beans") || fallbackInItemId;
     var gbResolved = findInventoryItemForCategory(gbRef, "Green Beans");
     if (gbResolved.item) {
       var gbNotes = "Green Bean shipment received" + suffix;
@@ -1561,11 +1603,9 @@ function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, f
   }
 
   if (ck.id === "ck_roasted_beans") {
-    var qtyInput = parseFloat(respMap["Quantity input"]) || 0;
-    var qtyOutput = parseFloat(respMap["Quantity output"]) || 0;
-    // "Type of Beans" is always a Green Beans item. The OUT goes against it, the IN goes
-    // against its Roasted Beans equivalent (separate inventory row in a different category).
-    var beanRef = respMap["Type of Beans"] || fallbackInItemId;
+    var qtyInput = readQty("Quantity input");
+    var qtyOutput = readQty("Quantity output");
+    var beanRef = readField("Type of Beans") || fallbackInItemId;
     if (qtyInput > 0) {
       var gbOut = findInventoryItemForCategory(beanRef, "Green Beans");
       if (gbOut.item) {
@@ -1594,17 +1634,15 @@ function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, f
   }
 
   if (ck.id === "ck_grinding") {
-    var qIn = parseFloat(respMap["Quantity input"]) || 0;
-    var qOut = parseFloat(respMap["Quantity output"]) || 0;
-    // Back-compat: older templates only had "Total Net weight". Use it for both sides when
-    // the explicit input/output fields are absent so no production data is silently dropped.
-    var netWeight = parseFloat(respMap["Total Net weight"]) || 0;
+    var qIn = readQty("Quantity input");
+    var qOut = readQty("Quantity output");
+    var netWeight = readQty("Total Net weight");
     if (qIn <= 0 && netWeight > 0) qIn = netWeight;
     if (qOut <= 0 && netWeight > 0) qOut = netWeight;
 
     // Resolve the underlying bean type. Grinding doesn't carry it directly, so follow the
     // tagged Roast ID (auto-id of a prior Roasted Beans QC) to its "Type of Beans" field.
-    var roastAutoId = respMap["Roast ID"] || "";
+    var roastAutoId = readField("Roast ID") || "";
     var beanRefG = "";
     if (roastAutoId) {
       var roastCk = lookupChecklist("ck_roasted_beans");
@@ -1923,13 +1961,23 @@ function handleEditResponse(body, user) {
   for (var j = 0; j < ocs.length; j++) { if (String(ocs[j].id) === String(ocId)) { oc = ocs[j]; break; } }
   if (!oc) return { error: "Order checklist not found" };
 
+  var ck = lookupChecklist(oc.checklist_id);
+  if (!ck) return { error: "Checklist template not found" };
+
+  // ── Phase 5: Validate downstream quantity constraints before saving ──
+  if (oc.auto_id) {
+    var editResponsesMapForValidation = responsesArrayToMap(newResponses);
+    var newMasterQty = getMasterQuantityFromResponses(ck.questions, editResponsesMapForValidation);
+    if (newMasterQty > 0) {
+      var qvResult = validateQuantityEdit(oc.checklist_id, oc.auto_id, newMasterQty);
+      if (!qvResult.allowed) return { error: qvResult.reason };
+    }
+  }
+
   if (newPerson) oc.completed_by = newPerson;
   if (newDate) oc.work_date = newDate;
   var ocIdx = findRowIndex(SHEETS.ORDER_CHECKLISTS, ocId);
   if (ocIdx > 0) updateSheetRow(SHEETS.ORDER_CHECKLISTS, ocIdx, oc);
-
-  var ck = lookupChecklist(oc.checklist_id);
-  if (!ck) return { error: "Checklist template not found" };
   var order = lookupOrder(oc.order_id);
   var customerLabel = order ? lookupCustomerLabel(order.customer_id) : "";
   var orderTypeLabel = order ? lookupOrderTypeLabel(order.order_type) : "";
@@ -2234,11 +2282,15 @@ function handleGetArchives() {
 
 // ─── Untagged Checklists ──────────────────────────────────────
 
+function isDeleted(row) {
+  return row.is_deleted === true || row.is_deleted === "true";
+}
+
 function handleGetUntagged() {
   ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
   // Show a checklist in the dashboard while its output quantity has NOT been fully consumed.
   // Consumption = max(tagged_quantity, total allocations in QuantityAllocations).
-  return getRows(SHEETS.UNTAGGED_CHECKLISTS).map(function(r) {
+  return getRows(SHEETS.UNTAGGED_CHECKLISTS).filter(function(r) { return !isDeleted(r); }).map(function(r) {
     var totalQ = parseFloat(r.total_quantity) || 0;
     var taggedQ = parseFloat(r.tagged_quantity) || 0;
     var allocatedFromQA = r.auto_id ? getAllocatedQuantityForAutoId(r.auto_id) : 0;
@@ -2273,6 +2325,7 @@ function handleGetUntaggedResponse(params) {
   var r = null;
   for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(id)) { r = rows[i]; break; } }
   if (!r) return { error: "Untagged response not found: " + id };
+  if (isDeleted(r)) return { error: "Untagged response has been deleted: " + id };
   var totalQ = parseFloat(r.total_quantity) || 0;
   var taggedQ = parseFloat(r.tagged_quantity) || 0;
   var allocatedFromQA = r.auto_id ? getAllocatedQuantityForAutoId(r.auto_id) : 0;
@@ -2736,6 +2789,13 @@ function handleGetLinkedEntries(params) {
     }
   }
 
+  // Phase 6 Fix 1: Mark fully-allocated entries so the frontend can grey them out
+  for (var m = 0; m < entries.length; m++) {
+    var rem = entries[m].remainingQuantity;
+    var tot = entries[m].totalQuantity;
+    entries[m].fullyAllocated = (tot > 0 && rem <= 0);
+  }
+
   return entries;
 }
 
@@ -2817,6 +2877,8 @@ function handleGetInventoryItems() {
       currentStock: parseFloat(r.current_stock) || 0,
       minStockAlert: parseFloat(r.min_stock_alert) || 0,
       createdAt: r.created_at, isActive: r.is_active !== "false" && r.is_active !== false,
+      classificationId: r.classification_id || "",
+      classificationLabel: lookupClassificationLabel(r.classification_id),
       abbreviation: String(r.abbreviation || "").toUpperCase(),
       equivalentItems: safeParseJSON(r.equivalent_items, []),
     };
@@ -2835,6 +2897,8 @@ function handleCreateInventoryItem(body, user) {
   var openingStock = parseFloat(body.openingStock) || 0;
   var ab = validateAbbreviation(body.abbreviation);
   if (!ab) return { error: "Abbreviation is required (2-6 uppercase letters/digits)" };
+  var abDup = checkAbbreviationUniqueness(ab, body.category, "");
+  if (abDup) return { error: abDup };
   var obj = {
     id: id, category: body.category, name: body.name, unit: body.unit || "kg",
     opening_stock: openingStock, current_stock: openingStock,
@@ -2842,6 +2906,7 @@ function handleCreateInventoryItem(body, user) {
     created_at: new Date().toISOString(), is_active: "true",
     abbreviation: ab,
     equivalent_items: JSON.stringify(Array.isArray(body.equivalentItems) ? body.equivalentItems : []),
+    classification_id: body.classificationId || "",
   };
   appendToSheet(SHEETS.INVENTORY_ITEMS, obj);
   // Create opening stock ledger entry if > 0
@@ -2856,7 +2921,7 @@ function handleCreateInventoryItem(body, user) {
     });
   }
   writeAuditLog(user, "create", "InventoryItem", id, body.name);
-  return { id: id, category: body.category, name: body.name, unit: body.unit || "kg", openingStock: openingStock, currentStock: openingStock, minStockAlert: obj.min_stock_alert, createdAt: obj.created_at, isActive: true, abbreviation: ab };
+  return { id: id, category: body.category, name: body.name, unit: body.unit || "kg", openingStock: openingStock, currentStock: openingStock, minStockAlert: obj.min_stock_alert, createdAt: obj.created_at, isActive: true, abbreviation: ab, classificationId: obj.classification_id || "" };
 }
 
 function handleUpdateInventoryItem(body, user) {
@@ -2876,8 +2941,11 @@ function handleUpdateInventoryItem(body, user) {
   if (body.abbreviation !== undefined) {
     var ab2 = validateAbbreviation(body.abbreviation);
     if (!ab2) return { error: "Abbreviation must be 2-6 uppercase letters/digits" };
+    var abDup2 = checkAbbreviationUniqueness(ab2, item.category, id);
+    if (abDup2) return { error: abDup2 };
     item.abbreviation = ab2;
   }
+  if (body.classificationId !== undefined) item.classification_id = body.classificationId || "";
   // Two-way equivalent linking
   if (body.equivalentItems !== undefined) {
     var oldEqList = safeParseJSON(item.equivalent_items, []);
@@ -2967,6 +3035,7 @@ function handleGetInventoryLedger(params) {
       balanceAfter: parseFloat(r.balance_after) || 0,
       referenceType: r.reference_type, referenceId: r.reference_id,
       notes: r.notes, doneBy: r.done_by, createdAt: r.created_at,
+      classificationId: r.classification_id || "",
     };
   });
 }
@@ -3001,6 +3070,7 @@ function handleAddInventoryAdjustment(body, user) {
     reference_type: "manual", reference_id: "",
     notes: (adjType === "IN" ? "Addition" : "Reduction") + (body.notes ? ": " + body.notes : ""),
     done_by: user.displayName || user.username, created_at: new Date().toISOString(),
+    classification_id: item.classification_id || "",
   };
   appendToSheet(SHEETS.INVENTORY_LEDGER, ledgerEntry);
   writeAuditLog(user, "inventory_adjustment", "InventoryItem", itemId, adjType + " " + qty + " " + item.unit);
@@ -3022,6 +3092,15 @@ function handleEditInventoryLedger(body, user) {
   return { success: true };
 }
 
+function lookupClassificationLabel(classificationId) {
+  if (!classificationId) return "";
+  var rows = getRows(SHEETS.ROAST_CLASSIFICATIONS);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].id) === String(classificationId)) return rows[i].name || "";
+  }
+  return "";
+}
+
 function handleGetInventorySummary() {
   var items = getRows(SHEETS.INVENTORY_ITEMS);
   var summary = { greenBeans: 0, roastedBeans: 0, packedGoods: 0, lowStockCount: 0 };
@@ -3040,7 +3119,7 @@ function handleGetInventorySummary() {
 }
 
 // Helper: create inventory transaction (used by checklist submissions)
-function createInventoryTransaction(itemId, type, quantity, refType, refId, notes, doneBy, questionIndex) {
+function createInventoryTransaction(itemId, type, quantity, refType, refId, notes, doneBy, questionIndex, classificationId) {
   var idx = findRowIndex(SHEETS.INVENTORY_ITEMS, itemId);
   if (idx < 0) return;
   var rows = getRows(SHEETS.INVENTORY_ITEMS);
@@ -3066,6 +3145,7 @@ function createInventoryTransaction(itemId, type, quantity, refType, refId, note
     reference_type: refType || "manual", reference_id: refId || "",
     notes: notes || "", done_by: doneBy || "", created_at: new Date().toISOString(),
     question_index: (questionIndex === undefined || questionIndex === null || questionIndex === "") ? "" : String(questionIndex),
+    classification_id: classificationId || item.classification_id || "",
   });
 }
 
@@ -3162,6 +3242,341 @@ function reverseInventoryLedgerForRef(refType, refId, doneBy) {
   }
   invalidateCache(SHEETS.INVENTORY_LEDGER);
   return matches.length;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── PHASE 2: Classification System ─────────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetClassifications() {
+  ensureSheetHasAllColumns(SHEETS.ROAST_CLASSIFICATIONS);
+  var rows = getRows(SHEETS.ROAST_CLASSIFICATIONS);
+  var result = { roast_degree: [], grind_size: [] };
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (r.is_active === "false" || r.is_active === false) continue;
+    var entry = { id: r.id, name: r.name, type: r.type, description: r.description || "", createdBy: r.created_by || "", createdAt: r.created_at || "" };
+    var t = String(r.type || "").toLowerCase();
+    if (t === "roast_degree" && result.roast_degree) result.roast_degree.push(entry);
+    else if (t === "grind_size" && result.grind_size) result.grind_size.push(entry);
+  }
+  return result;
+}
+
+function handleAddClassification(body, user) {
+  ensureSheetHasAllColumns(SHEETS.ROAST_CLASSIFICATIONS);
+  var name = String(body.name || "").trim();
+  if (!name) return { error: "Name is required" };
+  var type = String(body.type || "").toLowerCase();
+  if (type !== "roast_degree" && type !== "grind_size") return { error: "Type must be 'roast_degree' or 'grind_size'" };
+  // Duplicate check (case-insensitive within same type)
+  var existing = getRows(SHEETS.ROAST_CLASSIFICATIONS);
+  for (var i = 0; i < existing.length; i++) {
+    if (String(existing[i].type) === type && String(existing[i].name).toLowerCase() === name.toLowerCase() && existing[i].is_active !== "false") {
+      return { error: "'" + name + "' already exists in " + type };
+    }
+  }
+  var now = new Date().toISOString();
+  var id = "rc_" + nextId();
+  var obj = { id: id, name: name, type: type, description: body.description || "", created_by: user.displayName || user.username, created_at: now, updated_at: now, is_active: "true" };
+  appendToSheet(SHEETS.ROAST_CLASSIFICATIONS, obj);
+  writeAuditLog(user, "create", "RoastClassification", id, name + " (" + type + ")");
+  return { id: id, name: name, type: type, description: obj.description, createdBy: obj.created_by, createdAt: now };
+}
+
+function handleEditClassification(body, user) {
+  var id = body.id;
+  if (!id) return { error: "Missing classification id" };
+  var idx = findRowIndex(SHEETS.ROAST_CLASSIFICATIONS, id);
+  if (idx < 0) return { error: "Classification not found" };
+  var rows = getRows(SHEETS.ROAST_CLASSIFICATIONS);
+  var entry = null;
+  for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(id)) { entry = rows[i]; break; } }
+  if (!entry) return { error: "Classification not found" };
+  var beforeState = JSON.stringify({ name: entry.name, description: entry.description });
+  if (body.name !== undefined) entry.name = String(body.name).trim();
+  if (body.description !== undefined) entry.description = String(body.description || "");
+  entry.updated_at = new Date().toISOString();
+  updateSheetRow(SHEETS.ROAST_CLASSIFICATIONS, idx, entry);
+  invalidateCache(SHEETS.ROAST_CLASSIFICATIONS);
+  var afterState = JSON.stringify({ name: entry.name, description: entry.description });
+  writeAuditLog(user, "edit", "RoastClassification", id, "before=" + beforeState + " after=" + afterState);
+  return { success: true, id: id, name: entry.name, description: entry.description };
+}
+
+function handleDeactivateClassification(body, user) {
+  var id = body.id;
+  if (!id) return { error: "Missing classification id" };
+  var idx = findRowIndex(SHEETS.ROAST_CLASSIFICATIONS, id);
+  if (idx < 0) return { error: "Classification not found" };
+  var rows = getRows(SHEETS.ROAST_CLASSIFICATIONS);
+  var entry = null;
+  for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(id)) { entry = rows[i]; break; } }
+  if (!entry) return { error: "Classification not found" };
+  // Check if used in any inventory item or ledger entry
+  var invItems = getRows(SHEETS.INVENTORY_ITEMS);
+  var usedIn = [];
+  for (var j = 0; j < invItems.length; j++) {
+    if (String(invItems[j].classification_id) === String(id)) usedIn.push(invItems[j].name);
+  }
+  if (usedIn.length > 0) {
+    return { error: "Cannot deactivate — used by inventory items: " + usedIn.join(", ") + ". Remove classification from those items first." };
+  }
+  entry.is_active = "false";
+  entry.updated_at = new Date().toISOString();
+  updateSheetRow(SHEETS.ROAST_CLASSIFICATIONS, idx, entry);
+  invalidateCache(SHEETS.ROAST_CLASSIFICATIONS);
+  writeAuditLog(user, "deactivate", "RoastClassification", id, entry.name);
+  return { success: true };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── PHASE 5: Quantity Validation — Universal ───────────────
+// ═══════════════════════════════════════════════════════════════
+
+// Traverses the downstream chain for a given entry and checks whether a new quantity
+// is safe. Returns { allowed: bool, reason: string, downstreamTotal: number }.
+function validateQuantityEdit(checklistType, entryAutoId, newQuantity) {
+  if (!entryAutoId) return { allowed: true, reason: "", downstreamTotal: 0 };
+  newQuantity = parseFloat(newQuantity) || 0;
+
+  // Determine what downstream checklists consume this entry
+  var downstreamConfig = {
+    "ck_green_beans": { consumerCkId: "ck_roasted_beans", fieldName: "Quantity input" },
+    "ck_roasted_beans": { consumerCkId: "ck_grinding", fieldName: "Total Net weight" },
+  };
+
+  var cfg = downstreamConfig[checklistType];
+  if (!cfg) {
+    // Also check QuantityAllocations
+    var allocTotal = getAllocatedQuantityForAutoId(entryAutoId);
+    if (newQuantity < allocTotal) {
+      return { allowed: false, reason: "Cannot reduce to " + newQuantity + ". " + allocTotal + "kg already allocated downstream.", downstreamTotal: allocTotal };
+    }
+    return { allowed: true, reason: "", downstreamTotal: allocTotal };
+  }
+
+  // Sum downstream usage from QuantityAllocations (preferred) and from response sheets
+  var allocTotal2 = getAllocatedQuantityForAutoId(entryAutoId);
+  var consumerCk = lookupChecklist(cfg.consumerCkId);
+  var sheetUsed = 0;
+  if (consumerCk) {
+    sheetUsed = getUsedQuantity(cfg.consumerCkId, entryAutoId, cfg.fieldName, "");
+  }
+  var downstreamTotal = Math.max(allocTotal2, sheetUsed);
+
+  if (newQuantity < downstreamTotal) {
+    return {
+      allowed: false,
+      reason: "Cannot reduce quantity to " + newQuantity + ". " + downstreamTotal + "kg is already committed downstream.",
+      downstreamTotal: downstreamTotal,
+    };
+  }
+  return { allowed: true, reason: "", downstreamTotal: downstreamTotal };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── PHASE 4 (partial): Soft Delete with Audit ─────────────
+// ═══════════════════════════════════════════════════════════════
+
+function handleSoftDeleteChecklist(body, user) {
+  var id = body.id;
+  var reason = body.reason || "";
+  var entityType = body.entityType || ""; // "untagged" or "order_checklist"
+  if (!id) return { error: "Missing id" };
+
+  // ── Untagged checklist soft-delete ──
+  if (entityType === "untagged" || String(id).indexOf("ut_") === 0) {
+    ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+    var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+    var ut = null;
+    for (var i = 0; i < utRows.length; i++) { if (String(utRows[i].id) === String(id)) { ut = utRows[i]; break; } }
+    if (!ut) return { error: "Untagged checklist not found" };
+    if (isDeleted(ut)) return { error: "Already deleted" };
+
+    // Check downstream dependencies
+    if (ut.auto_id) {
+      var refs = findUpstreamReferencesForAutoId(ut.auto_id);
+      if (refs.length > 0) {
+        return { error: "Cannot delete — first untag from: " + refs.join(", ") };
+      }
+    }
+    // Check if tagged to an order
+    if (ut.tagged_order_id && String(ut.tagged_order_id).trim() !== "") {
+      return { error: "Cannot delete — first remove from order: " + ut.tagged_order_id };
+    }
+
+    var beforeState = JSON.stringify({ id: ut.id, checklistName: ut.checklist_name, person: ut.person, date: ut.date, totalQuantity: ut.total_quantity });
+    // Soft delete
+    ut.is_deleted = "true";
+    var utIdx = findRowIndex(SHEETS.UNTAGGED_CHECKLISTS, id);
+    if (utIdx > 0) updateSheetRow(SHEETS.UNTAGGED_CHECKLISTS, utIdx, ut);
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+
+    // Reverse inventory ledger entries
+    var reversed = reverseInventoryLedgerForRef("untagged", id, user.displayName || user.username);
+    var reversed2 = reverseInventoryLedgerForRef("checklist", id, user.displayName || user.username);
+
+    writeAuditLog(user, "delete", "UntaggedChecklist", id, "Reason: " + reason + " | beforeState=" + beforeState + " | reversed " + (reversed + reversed2) + " ledger entries");
+    return { success: true, reversed: reversed + reversed2 };
+  }
+
+  // ── Order checklist soft-delete (revert to pending + audit log) ──
+  if (entityType === "order_checklist" || String(id).indexOf("oc_") === 0) {
+    var ocs = getRows(SHEETS.ORDER_CHECKLISTS);
+    var oc = null;
+    for (var j = 0; j < ocs.length; j++) { if (String(ocs[j].id) === String(id)) { oc = ocs[j]; break; } }
+    if (!oc) return { error: "Order checklist not found" };
+
+    // Check downstream
+    if (oc.auto_id) {
+      var refs2 = findUpstreamReferencesForAutoId(oc.auto_id);
+      if (refs2.length > 0) {
+        return { error: "Cannot delete — first untag from: " + refs2.join(", ") };
+      }
+    }
+
+    var ck = lookupChecklist(oc.checklist_id);
+    var beforeState2 = JSON.stringify({ id: oc.id, checklistId: oc.checklist_id, status: oc.status, completedBy: oc.completed_by, workDate: oc.work_date });
+
+    // Delete responses
+    if (ck) {
+      deleteResponseRow(ck.name, String(oc.order_id));
+      deleteFromMasterSummary(String(oc.order_id), ck.name);
+    }
+
+    // Reverse inventory
+    var rev = reverseInventoryLedgerForRef("checklist", id, user.displayName || user.username);
+
+    // Revert to pending
+    oc.status = "pending"; oc.completed_at = ""; oc.completed_by = ""; oc.work_date = "";
+    var ocIdx = findRowIndex(SHEETS.ORDER_CHECKLISTS, id);
+    if (ocIdx > 0) updateSheetRow(SHEETS.ORDER_CHECKLISTS, ocIdx, oc);
+
+    writeAuditLog(user, "delete", "Checklist", id, "Reason: " + reason + " | beforeState=" + beforeState2 + " | reversed " + rev + " ledger entries");
+    return { success: true, reversed: rev };
+  }
+
+  return { error: "Unknown entity type. Pass entityType='untagged' or 'order_checklist'" };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── PHASE 8: Edit Fixes ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+function handleEditUntaggedResponse(body, user) {
+  var id = body.id;
+  if (!id) return { error: "Missing untagged response id" };
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  var rows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var ut = null;
+  for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(id)) { ut = rows[i]; break; } }
+  if (!ut) return { error: "Untagged response not found" };
+  if (isDeleted(ut)) return { error: "Cannot edit a deleted entry" };
+
+  // Permission: admin or own submission
+  if (user.role !== "admin" && String(ut.submitted_by_user_id) !== String(user.id)) {
+    return { error: "You can only edit your own untagged checklists" };
+  }
+
+  var ck = lookupChecklist(ut.checklist_id);
+  if (!ck) return { error: "Checklist template not found" };
+
+  var newResponses = body.responses || [];
+  var newDate = body.date;
+  var newPerson = body.person;
+  var remarks = body.remarks || {};
+
+  // Build responses map and validate quantity downstream
+  var responsesMap = responsesArrayToMap(newResponses);
+  var oldTotalQty = parseFloat(ut.total_quantity) || 0;
+  var newTotalQty = getMasterQuantityFromResponses(ck.questions, responsesMap);
+  if (newTotalQty <= 0) {
+    var nq = ck.questions;
+    for (var qi = 0; qi < nq.length; qi++) {
+      if ((nq[qi].type === "number" || nq[qi].type === "text_number") &&
+          (nq[qi].text.toLowerCase().indexOf("quantity") >= 0 || nq[qi].text.toLowerCase().indexOf("weight") >= 0)) {
+        var qtyVal = parseFloat(responsesMap[qi]) || 0;
+        if (qtyVal > newTotalQty) newTotalQty = qtyVal;
+      }
+    }
+  }
+
+  // Validate downstream quantity constraints
+  if (ut.auto_id && newTotalQty < oldTotalQty) {
+    var vResult = validateQuantityEdit(ut.checklist_id, ut.auto_id, newTotalQty);
+    if (!vResult.allowed) return { error: vResult.reason };
+  }
+
+  var beforeState = JSON.stringify({ person: ut.person, date: ut.date, totalQuantity: oldTotalQty });
+
+  // Update fields
+  if (newPerson) ut.person = newPerson;
+  if (newDate) ut.date = newDate;
+  ut.responses = JSON.stringify(newResponses);
+  ut.remarks = JSON.stringify(remarks);
+  ut.total_quantity = newTotalQty;
+
+  var utIdx = findRowIndex(SHEETS.UNTAGGED_CHECKLISTS, id);
+  if (utIdx > 0) updateSheetRow(SHEETS.UNTAGGED_CHECKLISTS, utIdx, ut);
+  invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+
+  // Re-process inventory: reverse prior, then re-apply
+  var nqForInv = (ck && ck.questions) || [];
+  var hasInvLinks = nqForInv.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
+  var editPerson = newPerson || ut.person;
+
+  if (hasInvLinks) {
+    reverseInventoryLedgerForRef("untagged", id, editPerson);
+    reverseInventoryLedgerForRef("checklist", id, editPerson);
+    processInventoryLinks(ck, responsesMap, "untagged", id, editPerson, true);
+  } else {
+    reverseInventoryLedgerForRef("untagged", id, editPerson);
+    reverseInventoryLedgerForRef("checklist", id, editPerson);
+    var respMapByText = {};
+    for (var ri = 0; ri < newResponses.length; ri++) {
+      respMapByText[newResponses[ri].questionText] = newResponses[ri].response || "";
+    }
+    applyLegacyInventoryForChecklist(ck, respMapByText, "checklist", id, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true);
+  }
+
+  // Update per-checklist response tab if exists
+  var orderId = ut.tagged_order_id || "UNTAGGED";
+  deleteResponseRow(ck.name, orderId);
+  var respArray = newResponses.map(function(r) { return (r.response !== undefined && r.response !== null) ? String(r.response) : ""; });
+  var orderName = "", customerLabel = "";
+  if (ut.tagged_order_id) {
+    var order = lookupOrder(ut.tagged_order_id);
+    if (order) { orderName = order.name; customerLabel = lookupCustomerLabel(order.customer_id); }
+  }
+  writeResponseRow(ck.name, ck.questions, {
+    orderId: orderId, orderName: orderName, customer: customerLabel,
+    person: ut.person, date: ut.date, submittedAt: ut.submitted_at, responses: respArray, remarks: remarks,
+  });
+
+  var afterState = JSON.stringify({ person: ut.person, date: ut.date, totalQuantity: newTotalQty });
+  writeAuditLog(user, "edit", "UntaggedChecklist", id, "before=" + beforeState + " after=" + afterState);
+  return { success: true };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── PHASE 9: Abbreviation Uniqueness ───────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+// Validates that an abbreviation is unique within its category. Called during
+// create and update. Returns null if OK, or an error string if duplicate.
+function checkAbbreviationUniqueness(abbreviation, category, excludeItemId) {
+  if (!abbreviation || !category) return null;
+  var ab = String(abbreviation).toUpperCase();
+  var cat = String(category);
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  for (var i = 0; i < items.length; i++) {
+    if (String(items[i].id) === String(excludeItemId)) continue;
+    if (String(items[i].category) === cat && String(items[i].abbreviation || "").toUpperCase() === ab) {
+      return "Abbreviation '" + ab + "' already exists in " + cat + ". Please use a different one.";
+    }
+  }
+  return null;
 }
 
 // ─── One-time corrective: deduplicate ledger entries and recompute current_stock ──
@@ -5163,6 +5578,20 @@ function seedData() {
         components: JSON.stringify([{ category: "Roasted Beans", itemId: "", itemName: "Roasted Coffee", percentage: 80 }, { category: "Others", itemId: "", itemName: "Chicory", percentage: 20 }]),
         is_active: "true", created_at: nowIso },
     ].forEach(function(b) { appendToSheet(SHEETS.BLENDS, b); });
+  }
+
+  // SAFE SEED: Roast Classifications — only if empty
+  var rcSheet = getSheet(SHEETS.ROAST_CLASSIFICATIONS);
+  if (sheetIsEmpty(rcSheet)) {
+    var rcNow = new Date().toISOString();
+    [
+      { id: "rc_light", name: "Light Roast", type: "roast_degree", description: "Light brown, no oil on surface", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+      { id: "rc_medium", name: "Medium Roast", type: "roast_degree", description: "Medium brown, balanced flavor", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+      { id: "rc_dark", name: "Dark Roast", type: "roast_degree", description: "Dark brown, oily surface", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+      { id: "rc_fine", name: "Fine", type: "grind_size", description: "Fine grind for espresso", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+      { id: "rc_medium_grind", name: "Medium", type: "grind_size", description: "Medium grind for drip/pour-over", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+      { id: "rc_coarse", name: "Coarse", type: "grind_size", description: "Coarse grind for French press", created_by: "system", created_at: rcNow, updated_at: rcNow, is_active: "true" },
+    ].forEach(function(c) { appendToSheet(SHEETS.ROAST_CLASSIFICATIONS, c); });
   }
 
   // Delete the default "Sheet1" if it exists and is unused
