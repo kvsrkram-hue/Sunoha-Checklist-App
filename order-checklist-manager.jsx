@@ -594,11 +594,10 @@ function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData
           <span style={{fontSize:13,color:T.textSec,lineHeight:1.4,flex:1}}>{q.text}</span>
           {isAutoFilled&&<Badge variant="info" style={{fontSize:9}}>Auto-filled from {autoFilledSource||"source"}</Badge>}
         </div>
-        <select value={currentVal} disabled={isAutoFilled&&autoFilledReadOnly} onChange={e=>setFormData(p=>({...p,responses:{...p.responses,[qi]:e.target.value}}))}
-          style={{width:"100%",padding:"12px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${isAutoFilled?T.infoBorder:T.border}`,color:T.text,fontSize:15,outline:"none",opacity:(isAutoFilled&&autoFilledReadOnly)?0.85:1}}>
-          <option value="">— Select item —</option>
-          {items.map(it=><option key={it.id} value={it.id}>{it.name}{it.abbreviation?` (${it.abbreviation})`:""}</option>)}
-        </select>
+        <SearchableDropdown
+          options={items.map(it=>({label:it.name+(it.abbreviation?` (${it.abbreviation})`:""),value:it.id}))}
+          value={currentVal} onChange={v=>setFormData(p=>({...p,responses:{...p.responses,[qi]:v}}))}
+          disabled={isAutoFilled&&autoFilledReadOnly} placeholder="— Select item —"/>
       </div>
     );
   }
@@ -1774,23 +1773,27 @@ function OrderPreviewModal({ orderId, orders, orderTypes, customers, onClose }) 
 
 // ─── Searchable Dropdown (for linked entries + tag-to-order) ──
 
-function SearchableDropdown({ options, value, onChange, placeholder, emptyMessage }) {
+function SearchableDropdown({ options, value, onChange, placeholder, emptyMessage, disabled: fieldDisabled, style: outerStyle }) {
   const [open,setOpen]=useState(false);
   const [search,setSearch]=useState("");
   const ref=useRef(null);
-  const filtered=options.filter(o=>{const s=search.toLowerCase();const label=typeof o==="string"?o:o.label;return label.toLowerCase().includes(s)});
+  const filtered=(options||[]).filter(o=>{const s=search.toLowerCase();const label=typeof o==="string"?o:(o.label||"");return label.toLowerCase().includes(s)}).sort((a,b)=>{
+    const aD=typeof a==="object"&&a.disabled;const bD=typeof b==="object"&&b.disabled;
+    if(aD&&!bD)return 1;if(!aD&&bD)return -1;return 0;
+  });
   useEffect(()=>{
     const handler=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
     document.addEventListener("mousedown",handler);return()=>document.removeEventListener("mousedown",handler);
   },[]);
-  const selectedLabel=typeof value==="string"&&value?value:(options.find(o=>typeof o==="object"&&o.value===value)?.label||"");
+  const selectedOpt=(options||[]).find(o=>typeof o==="object"?o.value===value:o===value);
+  const selectedLabel=selectedOpt?(typeof selectedOpt==="string"?selectedOpt:selectedOpt.label):(value||"");
   return (
-    <div ref={ref} style={{position:"relative"}}>
-      <button onClick={()=>setOpen(!open)} style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:selectedLabel?T.text:T.textMut,fontSize:14,textAlign:"left",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+    <div ref={ref} style={{position:"relative",...(outerStyle||{})}}>
+      <button onClick={()=>{if(!fieldDisabled)setOpen(!open)}} style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:selectedLabel?T.text:T.textMut,fontSize:14,textAlign:"left",cursor:fieldDisabled?"not-allowed":"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",opacity:fieldDisabled?0.7:1}}>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{selectedLabel||placeholder||"Select..."}</span>
         <Icon name="chevron" size={14} color={T.textMut} style={{transform:open?"rotate(90deg)":"rotate(0)",transition:"transform .2s",flexShrink:0}}/>
       </button>
-      {open&&(
+      {open&&!fieldDisabled&&(
         <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:20,background:T.card,border:`1px solid ${T.border}`,borderRadius:T.radSm,marginTop:4,boxShadow:"0 8px 24px rgba(0,0,0,0.4)",maxHeight:250,display:"flex",flexDirection:"column"}}>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search..." autoFocus
             style={{padding:"10px 12px",background:T.bg,border:"none",borderBottom:`1px solid ${T.border}`,color:T.text,fontSize:14,outline:"none",minHeight:44}}/>
@@ -1798,8 +1801,13 @@ function SearchableDropdown({ options, value, onChange, placeholder, emptyMessag
             {filtered.length===0?<p style={{padding:12,fontSize:13,color:T.textMut}}>{emptyMessage||"No options found"}</p>:
               filtered.map((o,i)=>{
                 const label=typeof o==="string"?o:o.label;const val=typeof o==="string"?o:o.value;
-                return <button key={i} onClick={()=>{onChange(val);setOpen(false);setSearch("")}}
-                  style={{display:"block",width:"100%",padding:"10px 12px",background:val===value?T.accentBg:"none",border:"none",borderBottom:`1px solid ${T.border}`,color:T.text,fontSize:14,cursor:"pointer",textAlign:"left",minHeight:44}}>{label}</button>;
+                const isDisabled=typeof o==="object"&&o.disabled;
+                const sublabel=typeof o==="object"?o.sublabel:"";
+                return <button key={i} disabled={isDisabled} onClick={()=>{if(isDisabled)return;onChange(val);setOpen(false);setSearch("")}}
+                  style={{display:"block",width:"100%",padding:"10px 12px",background:val===value?T.accentBg:"none",border:"none",borderBottom:`1px solid ${T.border}`,color:isDisabled?T.textMut:T.text,fontSize:14,cursor:isDisabled?"not-allowed":"pointer",textAlign:"left",minHeight:44,opacity:isDisabled?0.4:1}}>
+                  <span>{label}</span>
+                  {sublabel&&<span style={{display:"block",fontSize:11,color:isDisabled?T.danger:T.textMut}}>{sublabel}</span>}
+                </button>;
               })
             }
           </div>
@@ -2007,20 +2015,17 @@ function RoastBatchSection({ entries, batches, onChange, classifications, onAddC
             </div>
             {/* Source batch dropdown */}
             <Field label="Source Green Bean Batch">
-              <select value={row.sourceAutoId} onChange={e => updateRow(i, { sourceAutoId: e.target.value })}
-                style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13}}>
-                <option value="">-- Select batch --</option>
-                {[...safeEntries].sort((a,b)=>{
+              <SearchableDropdown
+                options={[...safeEntries].sort((a,b)=>{
                   const af=a.fullyAllocated||(remainingFor(a,i)<=0&&(a.autoId||a.linkedId)!==row.sourceAutoId);
                   const bf=b.fullyAllocated||(remainingFor(b,i)<=0&&(b.autoId||b.linkedId)!==row.sourceAutoId);
                   return af&&!bf?1:!af&&bf?-1:0;
-                }).map((e, ei) => {
-                  const id = e.autoId || e.linkedId;
-                  const rem = remainingFor(e, i);
-                  const disabled = (e.fullyAllocated || rem <= 0) && id !== row.sourceAutoId;
-                  return <option key={ei} value={id} disabled={disabled}>{id} — {rem > 0 ? `${Math.round(rem*100)/100}kg available` : "fully allocated"}</option>;
+                }).map(e=>{
+                  const id=e.autoId||e.linkedId;const rem=remainingFor(e,i);
+                  const dis=(e.fullyAllocated||rem<=0)&&id!==row.sourceAutoId;
+                  return {label:id+" — "+(rem>0?Math.round(rem*100)/100+"kg available":"fully allocated"),value:id,disabled:dis,sublabel:dis?"fully allocated":""};
                 })}
-              </select>
+                value={row.sourceAutoId} onChange={v=>updateRow(i,{sourceAutoId:v})} placeholder="-- Select batch --"/>
             </Field>
             {selected && <div style={{fontSize:11,color:T.textMut,marginTop:-4}}>{Math.round(maxQty*100)/100}kg available from this batch</div>}
             {/* Quantities row */}
@@ -2050,12 +2055,11 @@ function RoastBatchSection({ entries, batches, onChange, classifications, onAddC
             {/* Roast classification */}
             <Field label="Roast Classification">
               <div style={{display:"flex",gap:6}}>
-                <select value={row.classificationId || ""} onChange={e => updateRow(i, { classificationId: e.target.value })}
-                  style={{flex:1,padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13}}>
-                  <option value="">-- Select --</option>
-                  {roastDegrees.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                {!addingClass && <button onClick={() => setAddingClass(true)} style={{padding:"6px 10px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>+ New</button>}
+                <SearchableDropdown
+                  options={roastDegrees.map(c=>({label:c.name,value:c.id}))}
+                  value={row.classificationId||""} onChange={v=>updateRow(i,{classificationId:v})} placeholder="-- Select --"
+                  style={{flex:1}}/>
+                {!addingClass && <button onClick={() => setAddingClass(true)} style={{padding:"6px 10px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>+ New</button>}
               </div>
             </Field>
             {addingClass && (
@@ -2504,11 +2508,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   return (
     <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:20}}>
       <Field label="Select Checklist">
-        <select value={selCkId} onChange={e=>{setSelCkId(e.target.value);setFormData(p=>({...p,responses:{},remarks:{}}))}}
-          style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:14}}>
-          <option value="">— Pick a checklist —</option>
-          {checklists.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
+        <SearchableDropdown options={checklists.map(c=>({label:c.name,value:c.id}))} value={selCkId} onChange={v=>{setSelCkId(v);setFormData(p=>({...p,responses:{},remarks:{}}))}} placeholder="— Pick a checklist —"/>
       </Field>
 
       {selCkId && <>
@@ -2948,7 +2948,7 @@ function NewOrderView({orderTypes,customers,checklists,currentUser,blends,orderS
       </Field>
       <Field label="Customer">
         {!showNewCust?<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>{customers.map(c=><Chip key={c.id} label={c.label} active={custId===c.id} onClick={()=>setCustId(c.id)}/>)}</div>
+          <SearchableDropdown options={customers.map(c=>({label:c.label,value:c.id}))} value={custId} onChange={setCustId} placeholder="— Select customer —"/>
           {currentUser?.role==="admin"&&<Btn variant="ghost" small onClick={()=>setShowNewCust(true)} style={{alignSelf:"flex-start"}}><Icon name="plus" size={14} color={T.textSec}/> New Customer</Btn>}
         </div>:<div style={{display:"flex",gap:8}}>
           <Input value={newCust} onChange={setNewCust} placeholder="Customer name..." style={{flex:1}}/>
@@ -2988,7 +2988,9 @@ function NewOrderView({orderTypes,customers,checklists,currentUser,blends,orderS
       </Field>
 
       <Field label="Assigned To"><Input value={assignedTo} onChange={setAssignedTo} placeholder="Team member name"/></Field>
-      <Field label="Order Type"><div style={{display:"flex",flexWrap:"wrap",gap:8}}>{orderTypes.map(ot=><Chip key={ot.id} label={ot.label} active={type===ot.id} onClick={()=>setType(ot.id)}/>)}</div></Field>
+      <Field label="Order Type">
+        <SearchableDropdown options={orderTypes.map(ot=>({label:ot.label,value:ot.id}))} value={type} onChange={setType} placeholder="— Select order type —"/>
+      </Field>
       <Field label="Order Stages">
         <p style={{fontSize:12,color:T.textMut,marginBottom:10}}>Auto-populated from the product type template. Customize as needed.</p>
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -5812,20 +5814,49 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                           : <Badge variant="danger" style={{ fontSize: 10 }}>{!hasGate && !hasAutoId ? "Source needs both Approval Gate and Auto ID enabled" : !hasGate ? "Source needs Approval Gate configured" : "Source checklist must have Auto ID enabled for linking to work"}</Badge>}
                       </div>;
                     })()}
-                    {/* Auto-fill info: configured per-question below */}
+                    {/* Auto-fill mapping builder */}
                     {q.linkedSource.checklistId && (() => {
                       const src = (allChecklists || []).find(c => c.id === q.linkedSource.checklistId);
                       if (!src) return null;
                       const srcQ = normalizeQuestions(src.questions);
-                      const mappedFields = questions.filter((tq, ti) => ti !== i && tq.autoFillMapping && tq.autoFillMapping.sourceFieldIdx !== "").map((tq, ti) => {
-                        const realIdx = questions.indexOf(tq);
-                        const srcField = srcQ[Number(tq.autoFillMapping.sourceFieldIdx)];
-                        return srcField ? `${srcField.text} → ${tq.text}${tq.autoFillMapping.readOnly !== false ? " [read-only]" : ""}` : null;
+                      const targetQuestions = questions.filter((tq, ti) => ti !== i);
+                      const mappedQuestions = questions.map((tq, ti) => {
+                        if (ti === i || !tq.autoFillMapping || tq.autoFillMapping.sourceFieldIdx === "" || tq.autoFillMapping.sourceFieldIdx === undefined) return null;
+                        return { targetIdx: ti, targetText: tq.text, sourceFieldIdx: tq.autoFillMapping.sourceFieldIdx, readOnly: tq.autoFillMapping.readOnly !== false };
                       }).filter(Boolean);
-                      return mappedFields.length > 0 ? <div style={{ marginTop: 8, padding: 8, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 4 }}>Auto-fill mappings:</span>
-                        {mappedFields.map((txt, mi) => <span key={mi} style={{ fontSize: 11, color: T.accent, display: "block", fontStyle: "italic" }}>{txt}</span>)}
-                      </div> : null;
+                      return <div style={{ marginTop: 8, padding: 10, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 6 }}>Auto-fill Mappings</span>
+                        {mappedQuestions.length === 0 && <span style={{ fontSize: 11, color: T.textMut, display: "block", marginBottom: 6 }}>No auto-fill mappings. Click + Add Mapping.</span>}
+                        {mappedQuestions.map((m, mi) => {
+                          const srcField = srcQ[Number(m.sourceFieldIdx)];
+                          return <div key={mi} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, padding: "6px 8px", background: T.bg, borderRadius: T.radSm, border: `1px solid ${T.border}`, flexWrap: "wrap" }}>
+                            <select value={m.sourceFieldIdx} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, sourceFieldIdx: e.target.value } })}
+                              style={{ flex: 1, minWidth: 100, padding: "4px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+                              <option value="">— Source —</option>
+                              {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
+                            </select>
+                            <span style={{ fontSize: 11, color: T.textMut }}>→</span>
+                            <select value={m.targetIdx} onChange={e => {
+                              const newTargetIdx = Number(e.target.value);
+                              if (newTargetIdx === m.targetIdx) return;
+                              updateQ(m.targetIdx, { autoFillMapping: null });
+                              updateQ(newTargetIdx, { autoFillMapping: { sourceFieldIdx: m.sourceFieldIdx, readOnly: m.readOnly } });
+                            }}
+                              style={{ flex: 1, minWidth: 100, padding: "4px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+                              {questions.map((tq, ti) => ti !== i ? <option key={ti} value={ti}>{tq.text || `Q${ti + 1}`}</option> : null)}
+                            </select>
+                            <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
+                              <input type="checkbox" checked={m.readOnly} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, readOnly: e.target.checked } })} style={{ accentColor: T.accent }} />
+                              Read-only
+                            </label>
+                            <button onClick={() => updateQ(m.targetIdx, { autoFillMapping: null })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Icon name="x" size={12} color={T.danger} /></button>
+                          </div>;
+                        })}
+                        <button onClick={() => {
+                          const available = questions.findIndex((tq, ti) => ti !== i && !tq.autoFillMapping);
+                          if (available >= 0) updateQ(available, { autoFillMapping: { sourceFieldIdx: "", readOnly: true } });
+                        }} style={{ background: "none", border: `1px dashed ${T.border}`, borderRadius: T.radSm, padding: "4px 10px", fontSize: 11, color: T.accent, cursor: "pointer", marginTop: 4 }}>+ Add Mapping</button>
+                      </div>;
                     })()}
                   </div>
                 )}
@@ -7084,14 +7115,9 @@ function BlendSelector({ blends, customerLabel, value, onChange }) {
   const selected = filtered.find(b => b.id === value);
   return (
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
-      <select value={value || ""} onChange={e=>{
-          const b = filtered.find(x => x.id === e.target.value);
-          onChange(b || null);
-        }}
-        style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:14}}>
-        <option value="">— Select blend —</option>
-        {filtered.map(b => <option key={b.id} value={b.id}>{b.name}{b.customer && b.customer !== "General" ? ` (${b.customer})` : ""}</option>)}
-      </select>
+      <SearchableDropdown
+        options={filtered.map(b=>({label:b.name+(b.customer&&b.customer!=="General"?` (${b.customer})`:""),value:b.id}))}
+        value={value||""} onChange={v=>{const b=filtered.find(x=>x.id===v);onChange(b||null)}} placeholder="— Select blend —"/>
       {selected && (
         <div style={{padding:"8px 10px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
           <p style={{fontSize:11,color:T.textMut}}>{blendComponentSummary(selected.components)}</p>
