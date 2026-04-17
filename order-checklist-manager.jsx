@@ -5814,56 +5814,26 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                           : <Badge variant="danger" style={{ fontSize: 10 }}>{!hasGate && !hasAutoId ? "Source needs both Approval Gate and Auto ID enabled" : !hasGate ? "Source needs Approval Gate configured" : "Source checklist must have Auto ID enabled for linking to work"}</Badge>}
                       </div>;
                     })()}
-                    {/* Auto-fill mapping builder */}
+                    {/* Auto-fill mappings summary (configured per-question below) */}
                     {q.linkedSource.checklistId && (() => {
                       const src = (allChecklists || []).find(c => c.id === q.linkedSource.checklistId);
                       if (!src) return null;
                       const srcQ = normalizeQuestions(src.questions);
-                      const targetQuestions = questions.filter((tq, ti) => ti !== i);
-                      const mappedQuestions = questions.map((tq, ti) => {
+                      const mapped = questions.map((tq, ti) => {
                         if (ti === i || !tq.autoFillMapping || tq.autoFillMapping.sourceFieldIdx === "" || tq.autoFillMapping.sourceFieldIdx === undefined) return null;
-                        return { targetIdx: ti, targetText: tq.text, sourceFieldIdx: tq.autoFillMapping.sourceFieldIdx, readOnly: tq.autoFillMapping.readOnly !== false };
+                        const sf = srcQ[Number(tq.autoFillMapping.sourceFieldIdx)];
+                        return sf ? `${sf.text} → ${tq.text}${tq.autoFillMapping.readOnly !== false ? " (read-only)" : ""}` : null;
                       }).filter(Boolean);
-                      return <div style={{ marginTop: 8, padding: 10, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 6 }}>Auto-fill Mappings</span>
-                        {mappedQuestions.length === 0 && <span style={{ fontSize: 11, color: T.textMut, display: "block", marginBottom: 6 }}>No auto-fill mappings. Click + Add Mapping.</span>}
-                        {mappedQuestions.map((m, mi) => {
-                          const srcField = srcQ[Number(m.sourceFieldIdx)];
-                          return <div key={mi} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, padding: "6px 8px", background: T.bg, borderRadius: T.radSm, border: `1px solid ${T.border}`, flexWrap: "wrap" }}>
-                            <select value={m.sourceFieldIdx} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, sourceFieldIdx: e.target.value } })}
-                              style={{ flex: 1, minWidth: 100, padding: "4px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
-                              <option value="">— Source —</option>
-                              {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
-                            </select>
-                            <span style={{ fontSize: 11, color: T.textMut }}>→</span>
-                            <select value={m.targetIdx} onChange={e => {
-                              const newTargetIdx = Number(e.target.value);
-                              if (newTargetIdx === m.targetIdx) return;
-                              updateQ(m.targetIdx, { autoFillMapping: null });
-                              updateQ(newTargetIdx, { autoFillMapping: { sourceFieldIdx: m.sourceFieldIdx, readOnly: m.readOnly } });
-                            }}
-                              style={{ flex: 1, minWidth: 100, padding: "4px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
-                              {questions.map((tq, ti) => ti !== i ? <option key={ti} value={ti}>{tq.text || `Q${ti + 1}`}</option> : null)}
-                            </select>
-                            <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
-                              <input type="checkbox" checked={m.readOnly} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, readOnly: e.target.checked } })} style={{ accentColor: T.accent }} />
-                              Read-only
-                            </label>
-                            <button onClick={() => updateQ(m.targetIdx, { autoFillMapping: null })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Icon name="x" size={12} color={T.danger} /></button>
-                          </div>;
-                        })}
-                        <button onClick={() => {
-                          const available = questions.findIndex((tq, ti) => ti !== i && !tq.autoFillMapping);
-                          if (available >= 0) updateQ(available, { autoFillMapping: { sourceFieldIdx: "", readOnly: true } });
-                        }} style={{ background: "none", border: `1px dashed ${T.border}`, borderRadius: T.radSm, padding: "4px 10px", fontSize: 11, color: T.accent, cursor: "pointer", marginTop: 4 }}>+ Add Mapping</button>
-                      </div>;
+                      return mapped.length > 0 ? <div style={{ marginTop: 8, padding: 8, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 4 }}>Active auto-fill mappings:</span>
+                        {mapped.map((txt, mi) => <span key={mi} style={{ fontSize: 11, color: T.accent, display: "block" }}>{txt}</span>)}
+                      </div> : <div style={{ marginTop: 6, fontSize: 11, color: T.textMut }}>Configure auto-fill on each question below using "Auto-fill from {src.name}".</div>;
                     })()}
                   </div>
                 )}
 
                 {/* ── Per-question Auto-fill from Source ── */}
                 {!q.linkedSource && (() => {
-                  // Find if this checklist has any linked source configured
                   const linkedQ = questions.find(qq => qq.linkedSource && qq.linkedSource.checklistId);
                   if (!linkedQ) return null;
                   const src = (allChecklists || []).find(c => c.id === linkedQ.linkedSource.checklistId);
@@ -5872,37 +5842,24 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                   const mapping = q.autoFillMapping;
                   const hasMapping = mapping && mapping.sourceFieldIdx !== "" && mapping.sourceFieldIdx !== undefined;
                   return <div style={{ marginTop: 4 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <button onClick={() => {
-                        if (hasMapping) { updateQ(i, { autoFillMapping: null }); }
-                        else { updateQ(i, { autoFillMapping: { sourceFieldIdx: "", readOnly: true } }); }
-                      }} style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${hasMapping ? T.info : T.borderLight}`, background: hasMapping ? T.info : "transparent", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
-                        {hasMapping && <Icon name="check" size={12} color={T.bg} />}
+                    {!mapping ? (
+                      <button onClick={() => updateQ(i, { autoFillMapping: { sourceFieldIdx: "", readOnly: true } })}
+                        style={{ background: "none", border: `1px dashed ${T.border}`, borderRadius: T.radSm, padding: "4px 10px", fontSize: 11, color: T.info, cursor: "pointer" }}>
+                        + Auto-fill from {src.name}
                       </button>
-                      <span style={{ fontSize: 12, color: T.textSec }}>Auto-fill from {src.name}</span>
-                      {hasMapping && <Badge variant="info" style={{ fontSize: 9 }}>Active</Badge>}
-                    </div>
-                    {mapping && (
-                      <div style={{ marginLeft: 26, marginTop: 6, background: T.bg, borderRadius: T.radSm, padding: 8, border: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 6 }}>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 11, color: T.textMut, flexShrink: 0 }}>Source field:</span>
-                          <select value={mapping.sourceFieldIdx ?? ""} onChange={e => updateQ(i, { autoFillMapping: { ...mapping, sourceFieldIdx: e.target.value } })}
-                            style={{ flex: 1, minWidth: 120, padding: "6px 8px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12 }}>
-                            <option value="">— Select source field —</option>
-                            {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
-                          </select>
-                          <span style={{ fontSize: 11, color: T.textMut }}>→ fills this field</span>
-                        </div>
-                        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: T.textSec, cursor: "pointer" }}>
+                    ) : (
+                      <div style={{ background: T.bg, borderRadius: T.radSm, padding: 8, border: `1px solid ${T.infoBorder}`, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11, color: T.textMut, flexShrink: 0 }}>Pull value from:</span>
+                        <select value={mapping.sourceFieldIdx ?? ""} onChange={e => updateQ(i, { autoFillMapping: { ...mapping, sourceFieldIdx: e.target.value } })}
+                          style={{ flex: 1, minWidth: 120, padding: "4px 8px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+                          <option value="">— Select source field —</option>
+                          {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
+                        </select>
+                        <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
                           <input type="checkbox" checked={mapping.readOnly !== false} onChange={e => updateQ(i, { autoFillMapping: { ...mapping, readOnly: e.target.checked } })} style={{ accentColor: T.accent }} />
-                          Read-only when auto-filled
+                          Read-only
                         </label>
-                        {hasMapping && (() => {
-                          const srcField = srcQ[Number(mapping.sourceFieldIdx)];
-                          return srcField ? <span style={{ fontSize: 11, color: T.accent, fontStyle: "italic" }}>
-                            {srcField.text} (source) → {q.text || "this field"}{mapping.readOnly !== false ? " [read-only]" : ""}
-                          </span> : null;
-                        })()}
+                        <button onClick={() => updateQ(i, { autoFillMapping: null })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Icon name="x" size={12} color={T.danger} /></button>
                       </div>
                     )}
                   </div>;
