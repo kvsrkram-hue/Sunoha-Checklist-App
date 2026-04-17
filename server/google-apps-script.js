@@ -1535,6 +1535,7 @@ function getSubmissionByAutoId(autoId, sourceCk) {
   }
   var uts = getRows(SHEETS.UNTAGGED_CHECKLISTS);
   for (var j = 0; j < uts.length; j++) {
+    if (isDeleted(uts[j])) continue;
     if (String(uts[j].auto_id) === String(autoId) && String(uts[j].checklist_id) === String(sourceCk.id)) {
       var responses = safeParseJSON(uts[j].responses, []);
       var rmap2 = responsesArrayToMap(responses);
@@ -2010,39 +2011,37 @@ function handleSubmitChecklist(body, user) {
   deleteResponseRow(ck.name, String(oc.order_id));
   deleteFromMasterSummary(String(oc.order_id), ck.name);
 
-  // Write to per-checklist response tab — capture ALL responses including yes/no, approval gate, dates, inventory items
+  // Build response array for sheet write
   var respArray = responses.map(function(r) { return (r.response !== undefined && r.response !== null) ? String(r.response) : ""; });
   var remarks = body.remarks || {};
-  writeResponseRow(ck.name, ck.questions, {
-    orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
-    person: person, date: date, submittedAt: now, responses: respArray, remarks: remarks,
-  });
-
-  // Write to Master Summary
-  addToMasterSummary({
-    orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
-    orderType: orderTypeLabel, checklistName: ck.name, person: person, date: date, submittedAt: now,
-  });
 
   // ── Multi-batch roasting path (ck_roasted_beans with roast_batches array) ──
   var roastBatches = body.roast_batches || null;
   if (ck.id === "ck_roasted_beans" && Array.isArray(roastBatches) && roastBatches.length > 0) {
     var rbValidation = validateRoastBatches(roastBatches, oc.auto_id || "");
     if (!rbValidation.ok) return { error: rbValidation.error };
-    // Override autoId with multi-batch aware format
     autoId = buildRoastAutoId(rbValidation.processed, date || now);
     oc.auto_id = autoId;
     updateSheetRow(SHEETS.ORDER_CHECKLISTS, ocIdx, oc);
-    // Store roast_batches JSON in the "Shipment number used" response field (index 0).
-    // This field is unused in multi-batch mode but exists in the template, so
-    // writeResponseRow will persist it in the per-checklist sheet column.
-    var batchesJson = JSON.stringify(roastBatches);
-    if (respArray.length > 0) respArray[0] = batchesJson;
-    // Apply inventory per-batch
+    // Store roast_batches JSON in "Shipment number used" column (index 0) BEFORE writing
+    if (respArray.length > 0) respArray[0] = JSON.stringify(roastBatches);
+    // Fill summary quantities into template fields so they are persisted and readable
+    var totalIn = 0, totalOut = 0;
+    for (var ti = 0; ti < rbValidation.processed.length; ti++) { totalIn += rbValidation.processed[ti].inputQty; totalOut += rbValidation.processed[ti].outputQty; }
+    if (respArray.length > 3) respArray[3] = String(totalIn);   // Quantity input
+    if (respArray.length > 4) respArray[4] = String(totalOut);  // Quantity output
+    if (respArray.length > 6) respArray[6] = String(Math.round((totalIn - totalOut) * 100) / 100); // Loss in weight
+    // Write response row with batch data embedded
+    writeResponseRow(ck.name, ck.questions, {
+      orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
+      person: person, date: date, submittedAt: now, responses: respArray, remarks: remarks,
+    });
+    addToMasterSummary({
+      orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
+      orderType: orderTypeLabel, checklistName: ck.name, person: person, date: date, submittedAt: now,
+    });
     applyRoastBatchInventory(rbValidation.processed, "checklist", ocId, person);
-    // Write quantity allocations per-batch
     if (autoId) applyRoastBatchAllocations(rbValidation.processed, autoId, "checklist", ocId, person);
-    // Audit log per batch
     for (var bi = 0; bi < rbValidation.processed.length; bi++) {
       var bp = rbValidation.processed[bi];
       writeAuditLog(user, "tag", "roast_batch_link", ocId,
@@ -2051,6 +2050,16 @@ function handleSubmitChecklist(body, user) {
     writeAuditLog(user, "submit", "Checklist", ocId, ck.name + " [" + autoId + "] (" + rbValidation.processed.length + " batches)");
     return { success: true, autoId: autoId };
   }
+
+  // Standard path — write responses and master summary
+  writeResponseRow(ck.name, ck.questions, {
+    orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
+    person: person, date: date, submittedAt: now, responses: respArray, remarks: remarks,
+  });
+  addToMasterSummary({
+    orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
+    orderType: orderTypeLabel, checklistName: ck.name, person: person, date: date, submittedAt: now,
+  });
 
   // ── Inventory processing: new inventoryLink system takes precedence over legacy ──
   // If any question on this checklist has inventoryLink.enabled, we ONLY run the new
@@ -2551,15 +2560,29 @@ function handleSubmitUntagged(body, user) {
   // Generate auto ID
   var autoId = generateAutoId(ck, responsesMap, date || now);
 
-  // Extract total quantity: prefer master quantity field if any, else heuristic
-  var totalQuantity = getMasterQuantityFromResponses(ck.questions, responsesMap);
-  if (totalQuantity <= 0) {
-    var nq = ck.questions;
-    for (var qi = 0; qi < nq.length; qi++) {
-      if ((nq[qi].type === "number" || nq[qi].type === "text_number") &&
-          (nq[qi].text.toLowerCase().indexOf("quantity") >= 0 || nq[qi].text.toLowerCase().indexOf("weight") >= 0 || nq[qi].text.toLowerCase().indexOf("net") >= 0)) {
-        var qtyVal = parseFloat(responsesMap[qi]) || 0;
-        if (qtyVal > totalQuantity) totalQuantity = qtyVal;
+  // ── Multi-batch roasting path for ck_roasted_beans ──
+  var utRoastBatches = body.roast_batches || null;
+  var isMultiBatchRoast = checklistId === "ck_roasted_beans" && Array.isArray(utRoastBatches) && utRoastBatches.length > 0;
+  if (isMultiBatchRoast) {
+    var utRbVal = validateRoastBatches(utRoastBatches, "");
+    if (!utRbVal.ok) return { error: utRbVal.error };
+    autoId = buildRoastAutoId(utRbVal.processed, date || now);
+  }
+
+  // Extract total quantity
+  var totalQuantity = 0;
+  if (isMultiBatchRoast) {
+    for (var tqi = 0; tqi < utRoastBatches.length; tqi++) totalQuantity += parseFloat(utRoastBatches[tqi].outputQty) || 0;
+  } else {
+    totalQuantity = getMasterQuantityFromResponses(ck.questions, responsesMap);
+    if (totalQuantity <= 0) {
+      var nq = ck.questions;
+      for (var qi = 0; qi < nq.length; qi++) {
+        if ((nq[qi].type === "number" || nq[qi].type === "text_number") &&
+            (nq[qi].text.toLowerCase().indexOf("quantity") >= 0 || nq[qi].text.toLowerCase().indexOf("weight") >= 0 || nq[qi].text.toLowerCase().indexOf("net") >= 0)) {
+          var qtyVal = parseFloat(responsesMap[qi]) || 0;
+          if (qtyVal > totalQuantity) totalQuantity = qtyVal;
+        }
       }
     }
   }
@@ -2575,16 +2598,35 @@ function handleSubmitUntagged(body, user) {
   };
   appendToSheet(SHEETS.UNTAGGED_CHECKLISTS, obj);
 
-  // Run inventory link + quantity allocation processing now
-  var nqForInvCheckUt = (ck && ck.questions) || [];
-  var hasInventoryLinkQuestionsUt = nqForInvCheckUt.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
-  if (hasInventoryLinkQuestionsUt) {
-    processInventoryLinks(ck, responsesMap, "untagged", id, person, false);
-  }
-  if (autoId) processQuantityAllocationsForSubmission(ck, responsesMap, batchAllocations, autoId, "checklist", id, person, "", true);
-
-  // Write to per-checklist response tab immediately (Order ID = "UNTAGGED" or actual order ID)
+  // Build respArray for per-checklist response tab
   var respArray = responses.map(function(r) { return (r.response !== undefined && r.response !== null) ? String(r.response) : ""; });
+
+  if (isMultiBatchRoast) {
+    // Store batch JSON in Shipment column + fill summary fields
+    if (respArray.length > 0) respArray[0] = JSON.stringify(utRoastBatches);
+    var utTotalIn = 0, utTotalOut = 0;
+    for (var uti = 0; uti < utRbVal.processed.length; uti++) { utTotalIn += utRbVal.processed[uti].inputQty; utTotalOut += utRbVal.processed[uti].outputQty; }
+    if (respArray.length > 3) respArray[3] = String(utTotalIn);
+    if (respArray.length > 4) respArray[4] = String(utTotalOut);
+    if (respArray.length > 6) respArray[6] = String(Math.round((utTotalIn - utTotalOut) * 100) / 100);
+    // Inventory per-batch (skip legacy processInventoryLinks)
+    applyRoastBatchInventory(utRbVal.processed, "untagged", id, person);
+    if (autoId) applyRoastBatchAllocations(utRbVal.processed, autoId, "checklist", id, person);
+    for (var utbi = 0; utbi < utRbVal.processed.length; utbi++) {
+      var utbp = utRbVal.processed[utbi];
+      writeAuditLog(user, "tag", "roast_batch_link", id,
+        "Batch " + (utbi + 1) + ": Input " + utbp.inputQty + "kg from " + utbp.sourceAutoId + " → Output " + utbp.outputQty + "kg");
+    }
+  } else {
+    // Standard inventory processing
+    var nqForInvCheckUt = (ck && ck.questions) || [];
+    var hasInventoryLinkQuestionsUt = nqForInvCheckUt.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
+    if (hasInventoryLinkQuestionsUt) {
+      processInventoryLinks(ck, responsesMap, "untagged", id, person, false);
+    }
+    if (autoId) processQuantityAllocationsForSubmission(ck, responsesMap, batchAllocations, autoId, "checklist", id, person, "", true);
+  }
+
   var orderName = "", customerLabel = "", orderTypeLabel = "";
   if (orderId) {
     var order = lookupOrder(orderId);
@@ -2651,6 +2693,7 @@ function handleTagUntagged(body, user) {
     if (String(rows[i].id) === String(utId)) { ut = rows[i]; break; }
   }
   if (!ut) return { error: "Untagged checklist not found" };
+  if (isDeleted(ut)) return { error: "This entry has been deleted and cannot be tagged." };
 
   // Permission check: admin or own submission
   if (user.role !== "admin" && String(ut.submitted_by_user_id) !== String(user.id)) {
@@ -2795,6 +2838,7 @@ function getApprovedEntriesForChecklist(checklistId) {
   var uts = getRows(SHEETS.UNTAGGED_CHECKLISTS);
   var submittedAtToAutoId = {};
   for (var ui = 0; ui < uts.length; ui++) {
+    if (isDeleted(uts[ui])) continue;
     if (String(uts[ui].checklist_id) === String(checklistId) && uts[ui].auto_id) {
       submittedAtToAutoId[String(uts[ui].submitted_at)] = String(uts[ui].auto_id);
     }
@@ -2945,11 +2989,11 @@ function handleGetLinkedEntries(params) {
   var sourceChecklistId = linkedField.linkedSource.checklistId;
   var entries = getApprovedEntriesForChecklist(sourceChecklistId);
 
-  // Add quantity tracking if configured
+  // Add quantity tracking if configured — uses QuantityAllocations as single source of truth
+  // (same data source as backend validation in processQuantityAllocationsForSubmission)
   var qtyConfig = CHAIN_CONFIG.quantityTracking[checklistId];
   if (qtyConfig) {
     for (var e = 0; e < entries.length; e++) {
-      // Find source quantity from the entry's responses
       var totalQty = 0;
       for (var r = 0; r < entries[e].responses.length; r++) {
         if (entries[e].responses[r].question === qtyConfig.sourceQuantityField) {
@@ -2957,10 +3001,11 @@ function handleGetLinkedEntries(params) {
           break;
         }
       }
-      var usedQty = getUsedQuantity(checklistId, entries[e].autoId || entries[e].linkedId, qtyConfig.consumerQuantityField, "");
+      var entryAutoId = entries[e].autoId || entries[e].linkedId;
+      var allocQty = getAllocatedQuantityForAutoId(entryAutoId);
       entries[e].totalQuantity = totalQty;
-      entries[e].usedQuantity = usedQty;
-      entries[e].remainingQuantity = totalQty - usedQty;
+      entries[e].usedQuantity = allocQty;
+      entries[e].remainingQuantity = totalQty - allocQty;
     }
   }
 
@@ -3306,11 +3351,17 @@ function handleGetInventorySummary() {
 // Helper: create inventory transaction (used by checklist submissions)
 function createInventoryTransaction(itemId, type, quantity, refType, refId, notes, doneBy, questionIndex, classificationId) {
   var idx = findRowIndex(SHEETS.INVENTORY_ITEMS, itemId);
-  if (idx < 0) return;
+  if (idx < 0) {
+    Logger.log("⚠ createInventoryTransaction: item '" + itemId + "' not found in InventoryItems — ledger entry skipped (type=" + type + ", qty=" + quantity + ", refId=" + (refId || "") + ")");
+    return { warning: "item not found: " + itemId };
+  }
   var rows = getRows(SHEETS.INVENTORY_ITEMS);
   var item = null;
   for (var i = 0; i < rows.length; i++) { if (String(rows[i].id) === String(itemId)) { item = rows[i]; break; } }
-  if (!item) return;
+  if (!item) {
+    Logger.log("⚠ createInventoryTransaction: item '" + itemId + "' found by index but not in rows cache — ledger entry skipped");
+    return { warning: "item row not found: " + itemId };
+  }
 
   var currentStock = parseFloat(item.current_stock) || 0;
   var newStock = type === "IN" ? currentStock + quantity : currentStock - quantity;

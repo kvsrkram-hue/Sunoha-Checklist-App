@@ -1606,12 +1606,31 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
   );
 }
 
-function UntaggedPreviewModal({ ut, checklists, inventoryItems = [], isAdmin, onEdit, onClose }) {
+function UntaggedPreviewModal({ ut, checklists, inventoryItems = [], isAdmin, onEdit, onClose, classifications }) {
   const ck = checklists.find(c => c.id === ut.checklistId);
   const nq = ck ? normalizeQuestions(ck.questions) : [];
   const respList = Array.isArray(ut.responses) ? ut.responses : [];
+  // Build lookup by question text (stable across template reorders), fallback to index
+  const respByText = {};
   const respByIdx = {};
-  respList.forEach(r => { if (r && r.questionIndex !== undefined) respByIdx[r.questionIndex] = r.response; });
+  respList.forEach(r => {
+    if (r && r.questionText) respByText[r.questionText] = r.response;
+    if (r && r.questionIndex !== undefined) respByIdx[r.questionIndex] = r.response;
+  });
+  const getResp = (q, qi) => respByText[q.text] !== undefined ? respByText[q.text] : respByIdx[qi];
+  // Detect multi-batch roast entries: roast_batches JSON stored in "Shipment number used" field
+  const shipmentVal = getResp(nq[0] || {}, 0) || "";
+  let roastBatchesData = null;
+  if (ut.checklistId === "ck_roasted_beans" && typeof shipmentVal === "string" && shipmentVal.startsWith("[")) {
+    try { roastBatchesData = JSON.parse(shipmentVal); } catch(e) {}
+  }
+  // Lazy-load classifications for roast batch display
+  const [modalClassifications, setModalClassifications] = useState(classifications || null);
+  useEffect(() => {
+    if (roastBatchesData && !modalClassifications) {
+      API.get("getClassifications").then(d => { if (d && !d.error) setModalClassifications(d); }).catch(() => {});
+    }
+  }, []);
   const isReadOnly = !!ut.accessControl?.isTaggedToStage;
   return (
     <div onClick={onClose} style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:200,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
@@ -1648,14 +1667,23 @@ function UntaggedPreviewModal({ ut, checklists, inventoryItems = [], isAdmin, on
             <div><span style={{fontSize:11,color:T.textMut,display:"block"}}>Available</span><span style={{fontSize:14,fontWeight:600,color:(ut.remainingQuantity||0)>0?T.success:T.danger}}>{ut.remainingQuantity != null ? ut.remainingQuantity : ut.totalQuantity}</span></div>
           </div>
         )}
+        {roastBatchesData && Array.isArray(roastBatchesData) && roastBatchesData.length > 0 && (
+          <div style={{marginBottom:12}}>
+            <span style={{fontSize:12,fontWeight:600,color:T.accent,marginBottom:6,display:"block"}}>Roast Batches</span>
+            <RoastBatchTable batchesJson={roastBatchesData} classifications={modalClassifications}/>
+          </div>
+        )}
         <div style={{background:T.bg,borderRadius:T.radSm,padding:"10px 12px"}}>
           {nq.length === 0 ? <p style={{fontSize:12,color:T.textMut}}>No template found</p> :
-            nq.map((q, qi) => (
-              <div key={qi} style={{padding:"6px 0",borderBottom:qi<nq.length-1?`1px solid ${T.border}`:"none"}}>
-                <span style={{fontSize:11,color:T.textMut}}>{q.text}</span>
-                <div style={{fontSize:14,color:T.text,fontWeight:500,marginTop:2}}>{displayResponseValue(q, respByIdx[qi], inventoryItems)}</div>
-              </div>
-            ))
+            nq.map((q, qi) => {
+              if (roastBatchesData && ["Shipment number used","Quantity input","Quantity output","Loss in weight"].includes(q.text)) return null;
+              return (
+                <div key={qi} style={{padding:"6px 0",borderBottom:qi<nq.length-1?`1px solid ${T.border}`:"none"}}>
+                  <span style={{fontSize:11,color:T.textMut}}>{q.text}</span>
+                  <div style={{fontSize:14,color:T.text,fontWeight:500,marginTop:2}}>{displayResponseValue(q, getResp(q, qi), inventoryItems)}</div>
+                </div>
+              );
+            }).filter(Boolean)
           }
         </div>
       </div>
