@@ -1071,7 +1071,7 @@ export default function App() {
           }}/>}
 
         {currentView==="quickFill" && <QuickFillView checklists={checklists} orders={orders} customers={customers} currentUser={currentUser} approvedEntries={approvedEntries} inventoryItems={inventoryItems} inventoryCategories={inventoryCategories}
-          resumeDraft={resumeDraft}
+          resumeDraft={resumeDraft} addToast={addToast}
           onSaveDraft={async(payload)=>{
             try{
               const r=await API.post("saveDraft",payload);
@@ -2300,7 +2300,7 @@ function LinkedDropdown({ entries, value, onChange, checklistName, sourceCheckli
 
 // ─── Quick Fill View (Free-form Checklist) ────────────────────
 
-function QuickFillView({ checklists, orders, customers, currentUser, approvedEntries, inventoryItems, inventoryCategories, onSubmit, onSaveDraft, resumeDraft, allOrders }) {
+function QuickFillView({ checklists, orders, customers, currentUser, approvedEntries, inventoryItems, inventoryCategories, onSubmit, onSaveDraft, resumeDraft, allOrders, addToast }) {
   const [selCkId,setSelCkId]=useState(resumeDraft?.checklistId||"");
   const [formData,setFormData]=useState(()=>{
     if(resumeDraft){
@@ -2597,7 +2597,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
               if(r&&!r.error){const d=await API.get("getClassifications");if(d&&!d.error)setClassifications(d);}
               else throw new Error(r?.error||"Failed");
             }}
-            addToast={null}
+            addToast={addToast}
           />
         )}
 

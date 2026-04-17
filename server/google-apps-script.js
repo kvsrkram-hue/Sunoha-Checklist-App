@@ -2033,20 +2033,11 @@ function handleSubmitChecklist(body, user) {
     autoId = buildRoastAutoId(rbValidation.processed, date || now);
     oc.auto_id = autoId;
     updateSheetRow(SHEETS.ORDER_CHECKLISTS, ocIdx, oc);
-    // Store roast_batches JSON in the responses under a synthetic key
+    // Store roast_batches JSON in the "Shipment number used" response field (index 0).
+    // This field is unused in multi-batch mode but exists in the template, so
+    // writeResponseRow will persist it in the per-checklist sheet column.
     var batchesJson = JSON.stringify(roastBatches);
-    // Inject into response array so it persists in the per-checklist response sheet
-    var batchRespIdx = -1;
-    for (var bri = 0; bri < respArray.length; bri++) {
-      if (responses[bri] && responses[bri].questionText === "roast_batches") { batchRespIdx = bri; break; }
-    }
-    if (batchRespIdx < 0) respArray.push(batchesJson);
-    // Re-write response row to include batches
-    deleteResponseRow(ck.name, String(oc.order_id));
-    writeResponseRow(ck.name, ck.questions, {
-      orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
-      person: person, date: date, submittedAt: now, responses: respArray, remarks: remarks,
-    });
+    if (respArray.length > 0) respArray[0] = batchesJson;
     // Apply inventory per-batch
     applyRoastBatchInventory(rbValidation.processed, "checklist", ocId, person);
     // Write quantity allocations per-batch
@@ -2142,16 +2133,15 @@ function handleEditResponse(body, user) {
   var editRoastBatches = body.roast_batches || null;
   var editPerson = newPerson || oc.completed_by;
   if (ck.id === "ck_roasted_beans" && Array.isArray(editRoastBatches) && editRoastBatches.length > 0) {
+    // Capture before state from existing response sheet before reversal
+    var beforeBatches = "";
+    try {
+      var oldResp = readResponseRow(ck.name, ck.questions, String(oc.order_id));
+      if (oldResp && oldResp.responses && oldResp.responses[0]) beforeBatches = oldResp.responses[0].response || "";
+    } catch(e) {}
     // Reverse all prior inventory + allocations
     reverseInventoryLedgerForRef("checklist", ocId, editPerson);
     if (oc.auto_id) reverseAllocationsForDestination(oc.auto_id);
-    // Capture before state for audit
-    var beforeBatches = "";
-    try {
-      for (var ebi = 0; ebi < newResponses.length; ebi++) {
-        if (newResponses[ebi].questionText === "roast_batches") { beforeBatches = newResponses[ebi].response || ""; break; }
-      }
-    } catch(e) {}
     // Validate and apply new batches
     var editRbVal = validateRoastBatches(editRoastBatches, oc.auto_id || "");
     if (!editRbVal.ok) return { error: editRbVal.error };
