@@ -1559,7 +1559,7 @@ function getSubmissionByAutoId(autoId, sourceCk) {
 //
 // `fallbackInItemId` / `fallbackOutItemId` are only used when the response data doesn't
 // carry enough context to resolve an item directly — preserves the older client payload.
-function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, fallbackInItemId, fallbackOutItemId, isEdit) {
+function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, fallbackInItemId, fallbackOutItemId, isEdit, grindClassificationId) {
   if (!ck) return;
   var suffix = isEdit ? " (edited)" : "";
 
@@ -1676,7 +1676,7 @@ function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, f
       if (pkIn.item) {
         var gInNotes = "Packed goods produced" + suffix;
         if (pkIn.warning) gInNotes = pkIn.warning + " | " + gInNotes;
-        createInventoryTransaction(pkIn.item.id, "IN", qOut, refType, refId, gInNotes, person);
+        createInventoryTransaction(pkIn.item.id, "IN", qOut, refType, refId, gInNotes, person, "", grindClassificationId || "");
       } else {
         Logger.log("applyLegacyInventory ck_grinding IN: " + (pkIn.warning || "no item resolved"));
       }
@@ -2072,7 +2072,7 @@ function handleSubmitChecklist(body, user) {
     for (var ri = 0; ri < responses.length; ri++) {
       respMap[responses[ri].questionText] = responses[ri].response || "";
     }
-    applyLegacyInventoryForChecklist(ck, respMap, "checklist", ocId, person, body.inventoryItemId || "", body.inventoryOutputItemId || "");
+    applyLegacyInventoryForChecklist(ck, respMap, "checklist", ocId, person, body.inventoryItemId || "", body.inventoryOutputItemId || "", false, body.grindClassificationId || "");
   }
 
   writeAuditLog(user, "submit", "Checklist", ocId, ck.name + (autoId ? " [" + autoId + "]" : ""));
@@ -2173,7 +2173,7 @@ function handleEditResponse(body, user) {
     for (var riE = 0; riE < newResponses.length; riE++) {
       respMapE[newResponses[riE].questionText] = newResponses[riE].response || "";
     }
-    applyLegacyInventoryForChecklist(ck, respMapE, "checklist", ocId, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true);
+    applyLegacyInventoryForChecklist(ck, respMapE, "checklist", ocId, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true, body.grindClassificationId || "");
     Logger.log("handleEditResponse: legacy inventory — reversed " + reversedCount + " prior entries");
   }
 
@@ -2627,7 +2627,7 @@ function handleSubmitUntagged(body, user) {
     for (var ri2 = 0; ri2 < responses.length; ri2++) {
       respMap2[responses[ri2].questionText] = responses[ri2].response || "";
     }
-    applyLegacyInventoryForChecklist(ck, respMap2, "checklist", id, person, body.inventoryItemId || "", body.inventoryOutputItemId || "");
+    applyLegacyInventoryForChecklist(ck, respMap2, "checklist", id, person, body.inventoryItemId || "", body.inventoryOutputItemId || "", false, body.grindClassificationId || "");
   }
 
   writeAuditLog(user, "submit_untagged", "UntaggedChecklist", id, ck.name + (autoId ? " [" + autoId + "]" : "") + (orderId ? " (tagged to " + orderId + ")" : ""));
@@ -3722,7 +3722,7 @@ function handleEditUntaggedResponse(body, user) {
     for (var ri = 0; ri < newResponses.length; ri++) {
       respMapByText[newResponses[ri].questionText] = newResponses[ri].response || "";
     }
-    applyLegacyInventoryForChecklist(ck, respMapByText, "checklist", id, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true);
+    applyLegacyInventoryForChecklist(ck, respMapByText, "checklist", id, editPerson, body.inventoryItemId || "", body.inventoryOutputItemId || "", true, body.grindClassificationId || "");
   }
 
   // Update per-checklist response tab if exists

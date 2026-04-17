@@ -2134,6 +2134,18 @@ function RoastBatchTable({ batchesJson, classifications }) {
   );
 }
 
+function GrindClassAddBtn({ onAdd, addToast }) {
+  const [open,setOpen]=useState(false);
+  const [name,setName]=useState("");
+  const [saving,setSaving]=useState(false);
+  if(!open) return <button onClick={()=>setOpen(true)} style={{padding:"6px 10px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>+ New</button>;
+  return <div style={{display:"flex",gap:4,alignItems:"center",flexShrink:0}}>
+    <input value={name} onChange={e=>setName(e.target.value)} placeholder="Name..." autoFocus style={{width:100,padding:"4px 8px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.accentBorder}`,color:T.text,fontSize:12,outline:"none"}}/>
+    <Btn small onClick={async()=>{if(!name.trim())return;setSaving(true);try{await onAdd(name.trim())}catch(e){if(addToast)addToast(e.message,"error")}setSaving(false);setOpen(false);setName("")}} disabled={saving||!name.trim()}>{saving?"...":"Save"}</Btn>
+    <Btn small variant="ghost" onClick={()=>{setOpen(false);setName("")}}>Cancel</Btn>
+  </div>;
+}
+
 function BatchSelector({ entries, allocations, onChange, checklistName, emptyMessage }) {
   const safeEntries = entries || [];
   const rows = Array.isArray(allocations) && allocations.length > 0 ? allocations : [{ sourceAutoId: "", quantity: "" }];
@@ -2327,6 +2339,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   const [invError,setInvError]=useState({idx:null,message:""});
   const [roastBatches,setRoastBatches]=useState([{sourceAutoId:"",inputQty:"",outputQty:"",reasonForLoss:"",classificationId:""}]);
   const [classifications,setClassifications]=useState(null);
+  const [grindClassificationId,setGrindClassificationId]=useState("");
 
   const ck=checklists.find(c=>c.id===selCkId);
   const nq=ck?normalizeQuestions(ck.questions):[];
@@ -2352,9 +2365,9 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
     return "";
   };
 
-  // Load classifications when ck_roasted_beans is selected
+  // Load classifications when ck_roasted_beans or ck_grinding is selected
   useEffect(()=>{
-    if(selCkId==="ck_roasted_beans"&&!classifications){
+    if((selCkId==="ck_roasted_beans"||selCkId==="ck_grinding")&&!classifications){
       API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
     }
   },[selCkId]);
@@ -2468,7 +2481,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
       }
       return {questionIndex:qi,questionText:q.text,response:resp};
     });
-    const payload = {checklistId:selCkId,date:formData.date,person:formData.person,responses,remarks:formData.remarks,orderId:orderId||"",inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{}};
+    const payload = {checklistId:selCkId,date:formData.date,person:formData.person,responses,remarks:formData.remarks,orderId:orderId||"",inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{},grindClassificationId:grindClassificationId||""};
     if (isMultiBatchRoast) {
       // Validate roast batches before submitting
       const validBatches = roastBatches.filter(b => b.sourceAutoId && (parseFloat(b.inputQty) || 0) > 0);
@@ -2600,6 +2613,26 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
             addToast={addToast}
           />
         )}
+
+        {/* ── Grind Size Classification (ck_grinding only) ── */}
+        {selCkId==="ck_grinding"&&classifications&&(()=>{
+          const grindSizes=classifications.grind_size||[];
+          return <div style={{padding:12,background:T.accentBg,borderRadius:T.radSm,border:`1px solid ${T.accentBorder}`}}>
+            <Field label="Grind Size Classification (optional)">
+              <div style={{display:"flex",gap:6}}>
+                <SearchableDropdown
+                  options={[{label:"— None —",value:""},...grindSizes.map(c=>({label:c.name,value:c.id}))]}
+                  value={grindClassificationId} onChange={setGrindClassificationId} placeholder="— Select grind size —"
+                  style={{flex:1}}/>
+                <GrindClassAddBtn onAdd={async(name)=>{
+                  const r=await API.post("addClassification",{name,type:"grind_size"});
+                  if(r&&!r.error){const d=await API.get("getClassifications");if(d&&!d.error){setClassifications(d);setGrindClassificationId(r.id)}}
+                  else throw new Error(r?.error||"Failed");
+                }} addToast={addToast}/>
+              </div>
+            </Field>
+          </div>;
+        })()}
 
         <div style={{display:"flex",flexDirection:"column",gap:14}}>
           {nq.map((q,qi)=>{
