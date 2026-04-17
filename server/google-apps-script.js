@@ -3566,14 +3566,13 @@ function handleEditUntaggedResponse(body, user) {
 // Validates that an abbreviation is unique within its category. Called during
 // create and update. Returns null if OK, or an error string if duplicate.
 function checkAbbreviationUniqueness(abbreviation, category, excludeItemId) {
-  if (!abbreviation || !category) return null;
+  if (!abbreviation) return null;
   var ab = String(abbreviation).toUpperCase();
-  var cat = String(category);
   var items = getRows(SHEETS.INVENTORY_ITEMS);
   for (var i = 0; i < items.length; i++) {
     if (String(items[i].id) === String(excludeItemId)) continue;
-    if (String(items[i].category) === cat && String(items[i].abbreviation || "").toUpperCase() === ab) {
-      return "Abbreviation '" + ab + "' already exists in " + cat + ". Please use a different one.";
+    if (String(items[i].abbreviation || "").toUpperCase() === ab) {
+      return "Abbreviation '" + ab + "' already exists in inventory (used by: " + items[i].name + " in " + items[i].category + "). Abbreviations must be unique across all categories.";
     }
   }
   return null;

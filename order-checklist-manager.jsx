@@ -1368,6 +1368,7 @@ function TagPicker({ ut, checklists, orders, onTagToOrder, onTagToChecklist, onC
     return (e.autoId || e.linkedId || "").toLowerCase().includes(s);
   });
   const filteredOrders = (orders || []).filter(o => {
+    if (o.canTag === false || o.status === "delivered" || o.status === "cancelled") return false;
     const s = search.toLowerCase();
     return o.id.toLowerCase().includes(s) || (o.name || "").toLowerCase().includes(s);
   });
@@ -1845,11 +1846,15 @@ function BatchSelector({ entries, allocations, onChange, checklistName, emptyMes
               <select value={row.sourceAutoId} onChange={e=>updateRow(i,{sourceAutoId:e.target.value})}
                 style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:13}}>
                 <option value="">— Select batch —</option>
-                {safeEntries.map((e,ei)=>{
+                {[...safeEntries].sort((a,b)=>{
+                  const af=a.fullyAllocated||(remainingFor(a,i)<=0&&(a.autoId||a.linkedId)!==row.sourceAutoId);
+                  const bf=b.fullyAllocated||(remainingFor(b,i)<=0&&(b.autoId||b.linkedId)!==row.sourceAutoId);
+                  if(af&&!bf)return 1;if(!af&&bf)return -1;return 0;
+                }).map((e,ei)=>{
                   const id=e.autoId||e.linkedId;
                   const rem=remainingFor(e,i);
-                  const disabled=rem<=0&&id!==row.sourceAutoId;
-                  return <option key={ei} value={id} disabled={disabled}>{id} — {rem>0?`${rem} available`:"fully allocated"}</option>;
+                  const disabled=(e.fullyAllocated||rem<=0)&&id!==row.sourceAutoId;
+                  return <option key={ei} value={id} disabled={disabled}>{id} — {rem>0?`${rem} available`:"\u2014 fully allocated"}</option>;
                 })}
               </select>
               {selected && <div style={{fontSize:11,color:T.textMut,marginTop:4}}>{maxQty} available from this batch</div>}
@@ -1880,7 +1885,11 @@ function LinkedDropdown({ entries, value, onChange, checklistName, sourceCheckli
   const [preview,setPreview]=useState(null);
   const ref=useRef(null);
   const safeEntries=entries||[];
-  const filtered=safeEntries.filter(e=>{const s=search.toLowerCase();const id=e.autoId||e.linkedId||"";return id.toLowerCase().includes(s)||(e.linkedId||"").toLowerCase().includes(s)||(e.orderId||"").toLowerCase().includes(s)||(e.orderName||"").toLowerCase().includes(s)});
+  const filtered=safeEntries.filter(e=>{const s=search.toLowerCase();const id=e.autoId||e.linkedId||"";return id.toLowerCase().includes(s)||(e.linkedId||"").toLowerCase().includes(s)||(e.orderId||"").toLowerCase().includes(s)||(e.orderName||"").toLowerCase().includes(s)}).sort((a,b)=>{
+    const aFull=a.fullyAllocated||(a.totalQuantity>0&&a.remainingQuantity!==undefined&&a.remainingQuantity<=0);
+    const bFull=b.fullyAllocated||(b.totalQuantity>0&&b.remainingQuantity!==undefined&&b.remainingQuantity<=0);
+    if(aFull&&!bFull)return 1;if(!aFull&&bFull)return -1;return 0;
+  });
   useEffect(()=>{
     const handler=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
     document.addEventListener("mousedown",handler);return()=>document.removeEventListener("mousedown",handler);
@@ -1928,12 +1937,12 @@ function LinkedDropdown({ entries, value, onChange, checklistName, sourceCheckli
             {filtered.length===0?<p style={{padding:12,fontSize:13,color:T.textMut}}>No matching entries</p>:
               filtered.map((e,i)=>{
                 const id=displayId(e);
-                const isFull=e.totalQuantity>0&&e.remainingQuantity!==undefined&&e.remainingQuantity<=0;
+                const isFull=e.fullyAllocated||(e.totalQuantity>0&&e.remainingQuantity!==undefined&&e.remainingQuantity<=0);
                 return <button key={i} disabled={isFull} onClick={()=>{if(isFull)return;onChange(id);setOpen(false);setSearch("")}}
-                  style={{display:"block",width:"100%",padding:"10px 12px",background:id===value?T.accentBg:"none",border:"none",borderBottom:`1px solid ${T.border}`,color:isFull?T.textMut:T.text,fontSize:14,cursor:isFull?"not-allowed":"pointer",textAlign:"left",minHeight:44,opacity:isFull?0.5:1}}>
+                  style={{display:"block",width:"100%",padding:"10px 12px",background:id===value?T.accentBg:"none",border:"none",borderBottom:`1px solid ${T.border}`,color:isFull?T.textMut:T.text,fontSize:14,cursor:isFull?"not-allowed":"pointer",textAlign:"left",minHeight:44,opacity:isFull?0.4:1}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span style={{fontWeight:500}}>{id}</span>
-                    {e.remainingQuantity!==undefined&&e.totalQuantity>0&&<span style={{fontSize:11,color:isFull?T.danger:T.success}}>{isFull?"fully allocated":`${e.remainingQuantity} available`}</span>}
+                    <span style={{fontWeight:500,textDecoration:isFull?"line-through":"none"}}>{id}</span>
+                    {e.remainingQuantity!==undefined&&e.totalQuantity>0&&<span style={{fontSize:11,color:isFull?T.danger:T.success}}>{isFull?"\u2014 fully allocated":`${e.remainingQuantity} available`}</span>}
                   </div>
                   <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap"}}>
                     {e.person&&<span style={{fontSize:11,color:T.textMut}}>by {e.person}</span>}
@@ -4232,8 +4241,20 @@ function EditResponseView({ orderChecklistId, checklistId, checklists, approvedE
     API.get(action, { id: orderChecklistId }).then(data => {
       if (data && !data.error) {
         const map = {}, rmk = {};
-        if (data.responses) data.responses.forEach(r => { map[r.questionIndex] = r.response || ""; if (r.remark) rmk[r.questionIndex] = r.remark; });
-        setFormData({ date: data.workDate || "", person: data.person || "", responses: map, remarks: rmk, batchAllocations: {} });
+        if (data.responses) {
+          // Match by question text (stable across template reorders), falling back
+          // to question index only when the text lookup doesn't hit.
+          const textToIdx = {};
+          nq.forEach((q, qi) => { if (q.text) textToIdx[q.text] = qi; });
+          data.responses.forEach(r => {
+            let idx = (r.questionText && textToIdx[r.questionText] !== undefined)
+              ? textToIdx[r.questionText]
+              : r.questionIndex;
+            map[idx] = r.response || "";
+            if (r.remark) rmk[idx] = r.remark;
+          });
+        }
+        setFormData({ date: data.workDate || data.date || "", person: data.person || "", responses: map, remarks: rmk, batchAllocations: {} });
         setMeta({
           autoId: data.autoId || "",
           lastEditedBy: data.lastEditedBy || "",
@@ -4491,6 +4512,128 @@ function ResponsesLogView({ checklists, inventoryItems, isAdmin, addToast, onEdi
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ─── Classifications Management (used in Settings) ────���──────
+
+function ClassificationsSection({ addToast }) {
+  const [data, setData] = useState({ roast_degree: [], grind_size: [] });
+  const [loading, setLoading] = useState(true);
+  const [addForm, setAddForm] = useState(null); // { type, name, description }
+  const [editId, setEditId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = () => API.get("getClassifications").then(d => { if (d && !d.error) setData(d); }).catch(() => {}).finally(() => setLoading(false));
+  useEffect(() => { load(); }, []);
+
+  const handleAdd = async () => {
+    if (!addForm || !addForm.name.trim()) return;
+    setSaving(true); setError("");
+    try {
+      await API.post("addClassification", { name: addForm.name.trim(), type: addForm.type, description: addForm.description || "" });
+      setAddForm(null); await load(); addToast("Classification added", "success");
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const handleEdit = async (id) => {
+    if (!editName.trim()) return;
+    setSaving(true); setError("");
+    try {
+      await API.post("editClassification", { id, name: editName.trim(), description: editDesc });
+      setEditId(null); await load(); addToast("Classification updated", "success");
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const handleDeactivate = async (id, name) => {
+    if (!confirm(`Deactivate "${name}"? This cannot be undone if used in inventory.`)) return;
+    setSaving(true); setError("");
+    try {
+      await API.post("deactivateClassification", { id });
+      await load(); addToast("Classification deactivated", "success");
+    } catch (e) { setError(e.message); }
+    setSaving(false);
+  };
+
+  const renderGroup = (type, label) => {
+    const items = data[type] || [];
+    return (
+      <div style={{background:T.card,borderRadius:T.rad,padding:14,border:`1px solid ${T.border}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <span style={{fontSize:14,fontWeight:600,color:T.text}}>{label}</span>
+          <Badge variant="muted">{items.length}</Badge>
+        </div>
+        {items.length === 0 && <p style={{fontSize:12,color:T.textMut,marginBottom:8}}>No classifications defined.</p>}
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {items.map(c => (
+            <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,background:T.bg,borderRadius:T.radSm,padding:"8px 12px",border:`1px solid ${T.border}`}}>
+              {editId === c.id ? (
+                <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
+                  <input value={editName} onChange={e=>setEditName(e.target.value)} placeholder="Name..."
+                    style={{padding:"6px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
+                  <input value={editDesc} onChange={e=>setEditDesc(e.target.value)} placeholder="Description (optional)..."
+                    style={{padding:"6px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:12,outline:"none"}}/>
+                  <div style={{display:"flex",gap:6}}>
+                    <Btn small onClick={()=>handleEdit(c.id)} disabled={saving||!editName.trim()}>{saving?"Saving...":"Save"}</Btn>
+                    <Btn small variant="ghost" onClick={()=>setEditId(null)}>Cancel</Btn>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{flex:1}}>
+                    <span style={{fontSize:13,fontWeight:500,color:T.text}}>{c.name}</span>
+                    {c.description && <span style={{display:"block",fontSize:11,color:T.textMut,marginTop:2}}>{c.description}</span>}
+                  </div>
+                  <button onClick={()=>{setEditId(c.id);setEditName(c.name);setEditDesc(c.description||"")}} style={{background:"none",border:"none",cursor:"pointer",padding:4}}>
+                    <Icon name="edit" size={14} color={T.textSec}/>
+                  </button>
+                  <button onClick={()=>handleDeactivate(c.id,c.name)} disabled={saving} style={{background:"none",border:"none",cursor:"pointer",padding:4}}>
+                    <Icon name="trash" size={14} color={T.danger}/>
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        {addForm && addForm.type === type ? (
+          <div style={{marginTop:8,background:T.bg,borderRadius:T.radSm,padding:10,border:`1px solid ${T.accentBorder}`,display:"flex",flexDirection:"column",gap:6}}>
+            <input value={addForm.name} onChange={e=>setAddForm(p=>({...p,name:e.target.value}))} placeholder="Name..." autoFocus
+              style={{padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
+            <input value={addForm.description} onChange={e=>setAddForm(p=>({...p,description:e.target.value}))} placeholder="Description (optional)..."
+              style={{padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:12,outline:"none"}}/>
+            <div style={{display:"flex",gap:6}}>
+              <Btn small onClick={handleAdd} disabled={saving||!addForm.name.trim()}>{saving?"Adding...":"Save"}</Btn>
+              <Btn small variant="ghost" onClick={()=>{setAddForm(null);setError("")}}>Cancel</Btn>
+            </div>
+          </div>
+        ) : (
+          <Btn variant="ghost" small onClick={()=>{setAddForm({type,name:"",description:""});setError("")}} style={{marginTop:8}}>
+            <Icon name="plus" size={12} color={T.textSec}/> Add New
+          </Btn>
+        )}
+      </div>
+    );
+  };
+
+  if (loading) return <div style={{padding:20,textAlign:"center"}}><p style={{color:T.textMut,fontSize:13}}>Loading classifications...</p></div>;
+
+  return (
+    <div>
+      <Section icon="layers">Roast & Grind Classifications</Section>
+      <p style={{fontSize:12,color:T.textMut,marginTop:-10,marginBottom:12}}>Manage roast degree and grind size classifications used in inventory items.</p>
+      {error && <div style={{background:T.dangerBg,border:"1px solid rgba(232,93,93,0.25)",borderRadius:T.radSm,padding:"8px 12px",marginBottom:10}}>
+        <span style={{fontSize:12,color:T.danger}}>{error}</span>
+      </div>}
+      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+        {renderGroup("roast_degree", "Roast Degrees")}
+        {renderGroup("grind_size", "Grind Sizes")}
+      </div>
+    </div>
+  );
+}
+
 // ─── Admin / Settings View ────────────────────────────────────
 
 function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEditChecklist,onNewChecklist,onEditRules,onDeleteChecklist,onAddOrderType,onDeleteOrderType,onAddCustomer,onDeleteCustomer,onArchive,orderStageTemplates,onSaveOrderStageTemplates}){
@@ -4666,6 +4809,9 @@ function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEdi
         </div>
         <Btn small onClick={handleSaveStageTpl} disabled={stageTplSaving} style={{marginTop:12,width:"100%"}}>{stageTplSaving?"Saving...":"Save Stage Templates"}</Btn>
       </div>}
+
+      {/* ── Roast & Grind Classifications (Admin only) ── */}
+      {isAdmin && <ClassificationsSection addToast={addToast}/>}
 
       {/* ── Data Archiving (Admin only) ── */}
       {isAdmin && <div>
