@@ -109,6 +109,30 @@ const T = {
   warning:"#F0AD4E",warningBg:"rgba(240,173,78,0.08)",warningBorder:"rgba(240,173,78,0.25)",
 };
 
+// ─── Date Formatting Helpers ─────────────────────────────────
+
+const formatDate = (dateStr) => {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return String(dateStr);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}-${mm}-${yyyy}`;
+};
+
+const formatDateTime = (dateStr) => {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return String(dateStr);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${dd}-${mm}-${yyyy} ${hh}:${mi}`;
+};
+
 // ─── Question Utilities ───────────────────────────────────────
 
 const normalizeQuestions = (questions) => {
@@ -630,7 +654,7 @@ function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData
 
   // Invoice/SO searchable dropdown for Grinding & Packing checklist
   if(q.text === "Invoice/SO" && orders) {
-    const orderOptions = orders.map(o => {
+    const orderOptions = orders.filter(o => o.canTag !== false && o.status !== "delivered" && o.status !== "cancelled").map(o => {
       const cust = customers?.find(c => c.id === o.customerId);
       return { label: `${o.id} — ${cust?.label||""} — ${o.invoiceSo||"N/A"}`, value: o.invoiceSo || o.id };
     });
@@ -1498,6 +1522,7 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",gap:8,marginBottom:4,flexWrap:"wrap",alignItems:"center"}}>
                           {ut.autoId&&<button onClick={()=>setPreviewUt(ut)} style={{background:"none",border:`1px solid ${T.accentBorder}`,padding:"2px 8px",borderRadius:12,cursor:"pointer",fontSize:12,fontFamily:T.mono,color:T.accent,fontWeight:600}} title="View responses">{ut.autoId}</button>}
+                          {ut.taggedOrderId&&ut.taggedOrderId!=="UNTAGGED"&&<OrderBadge orderId={ut.taggedOrderId} orders={orders} orderTypes={orderTypes} customers={customers}/>}
                           {ut.person&&<span style={{fontSize:12,color:T.textSec}}>by {ut.person}</span>}
                           {ut.date&&<span style={{fontSize:12,color:T.textMut}}>{ut.date}</span>}
                         </div>
@@ -1553,7 +1578,7 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
                 <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap"}}>
                   {d.person&&<span style={{fontSize:11,color:T.textMut}}>by {d.person}</span>}
                   {d.workDate&&<span style={{fontSize:11,color:T.textMut}}>{d.workDate}</span>}
-                  {d.updatedAt&&<span style={{fontSize:11,color:T.textMut}}>updated {new Date(d.updatedAt).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>}
+                  {d.updatedAt&&<span style={{fontSize:11,color:T.textMut}}>updated {formatDateTime(d.updatedAt)}</span>}
                 </div>
               </div>
               <Btn small variant="secondary" onClick={()=>onResumeDraft(d)}><Icon name="edit" size={13} color={T.text}/> Continue</Btn>
@@ -1600,7 +1625,7 @@ function UntaggedPreviewModal({ ut, checklists, inventoryItems = [], isAdmin, on
               {ut.person && <span style={{fontSize:11,color:T.textMut}}>by {ut.person}</span>}
               {ut.date && <span style={{fontSize:11,color:T.textMut}}>{ut.date}</span>}
               {ut.lastEditedBy && ut.lastEditedAt && (
-                <span style={{fontSize:11,color:T.textMut}}>· Edited by {ut.lastEditedBy} at {new Date(ut.lastEditedAt).toLocaleString()}</span>
+                <span style={{fontSize:11,color:T.textMut}}>· Edited by {ut.lastEditedBy} at {formatDateTime(ut.lastEditedAt)}</span>
               )}
             </div>
           </div>
@@ -1634,6 +1659,114 @@ function UntaggedPreviewModal({ ut, checklists, inventoryItems = [], isAdmin, on
             ))
           }
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Order Preview Modal + Clickable Badge ──────────────────
+
+function OrderBadge({ orderId, orders, orderTypes, customers }) {
+  const [showModal, setShowModal] = useState(false);
+  if (!orderId || orderId === "UNTAGGED") return null;
+  return (
+    <>
+      <button onClick={(e)=>{e.stopPropagation();setShowModal(true)}} style={{background:"rgba(212,165,116,0.15)",border:"1px solid rgba(212,165,116,0.3)",borderRadius:12,padding:"2px 10px",cursor:"pointer",fontSize:12,fontFamily:T.mono,color:T.accent,fontWeight:600,display:"inline-flex",alignItems:"center",gap:4}} title="View order details">
+        <Icon name="package" size={10} color={T.accent}/>{orderId}
+      </button>
+      {showModal && <OrderPreviewModal orderId={orderId} orders={orders} orderTypes={orderTypes} customers={customers} onClose={()=>setShowModal(false)}/>}
+    </>
+  );
+}
+
+function OrderPreviewModal({ orderId, orders, orderTypes, customers, onClose }) {
+  const order = (orders || []).find(o => o.id === orderId);
+  const custLabel = order ? (customers || []).find(c => c.id === order.customerId)?.label || "" : "";
+  const otLabel = order ? (orderTypes || []).find(t => t.id === order.orderType)?.label || "" : "";
+  const statusColors = { beans_not_roasted: T.warning, beans_roasted: T.info, packed: T.accent, completed: T.success, delivered: T.success, cancelled: T.danger };
+  const ORDER_STATUS_LABELS_LOCAL = {"beans_not_roasted":"Beans not yet roasted","beans_roasted":"Beans roasted","packed":"Packed","completed":"Ready for delivery","delivered":"Delivered"};
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,zIndex:300,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:T.rad,padding:20,maxWidth:480,width:"100%",maxHeight:"85vh",overflowY:"auto",border:`1px solid ${T.border}`,boxShadow:"0 12px 40px rgba(0,0,0,0.6)"}}>
+        {!order ? (
+          <div style={{textAlign:"center",padding:20}}>
+            <p style={{color:T.textMut}}>Order <b style={{color:T.accent}}>{orderId}</b> not found in current data.</p>
+          </div>
+        ) : (
+          <>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:16}}>
+              <div>
+                <h3 style={{fontSize:18,fontWeight:600,color:T.accent,fontFamily:T.mono}}>{order.id}</h3>
+                <p style={{fontSize:14,color:T.text,marginTop:2}}>{order.name}</p>
+              </div>
+              <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><Icon name="x" size={20} color={T.textSec}/></button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+              <div style={{padding:"8px 12px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+                <div style={{fontSize:10,color:T.textMut,textTransform:"uppercase"}}>Client</div>
+                <div style={{fontSize:13,color:T.text,fontWeight:500,marginTop:2}}>{custLabel || "—"}</div>
+              </div>
+              <div style={{padding:"8px 12px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+                <div style={{fontSize:10,color:T.textMut,textTransform:"uppercase"}}>Order Type</div>
+                <div style={{fontSize:13,color:T.text,fontWeight:500,marginTop:2}}>{otLabel || "—"}</div>
+              </div>
+              <div style={{padding:"8px 12px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+                <div style={{fontSize:10,color:T.textMut,textTransform:"uppercase"}}>Status</div>
+                <Badge variant="muted" style={{background:(statusColors[order.status]||T.textMut)+"20",color:statusColors[order.status]||T.textMut,marginTop:4}}>{ORDER_STATUS_LABELS_LOCAL[order.status]||order.status}</Badge>
+              </div>
+              <div style={{padding:"8px 12px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+                <div style={{fontSize:10,color:T.textMut,textTransform:"uppercase"}}>Created</div>
+                <div style={{fontSize:13,color:T.text,fontWeight:500,marginTop:2}}>{formatDate(order.createdAt)}</div>
+              </div>
+            </div>
+            {order.invoiceSo && <div style={{padding:"8px 12px",background:T.accentBg,borderRadius:T.radSm,border:`1px solid ${T.accentBorder}`,marginBottom:12}}>
+              <span style={{fontSize:11,color:T.textMut}}>Invoice/SO:</span> <span style={{fontSize:13,fontWeight:600,color:T.accent}}>{order.invoiceSo}</span>
+            </div>}
+            {Array.isArray(order.orderLines) && order.orderLines.length > 0 && (
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:12,fontWeight:600,color:T.textSec,marginBottom:6}}>Blend Lines</div>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                    <thead><tr style={{background:T.surfaceHover}}>
+                      <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Blend</th>
+                      <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Qty</th>
+                      <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Tagged</th>
+                      <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut,borderBottom:`1px solid ${T.border}`}}>Remaining</th>
+                    </tr></thead>
+                    <tbody>
+                      {order.orderLines.map((l,i) => {
+                        const tq = parseFloat(l.taggedQuantity) || 0;
+                        const qty = parseFloat(l.quantity) || 0;
+                        return <tr key={i} style={{borderBottom:`1px solid ${T.border}`}}>
+                          <td style={{padding:"6px 8px",color:T.text}}>{l.blend || "—"}</td>
+                          <td style={{padding:"6px 8px",textAlign:"right",color:T.text}}>{qty}</td>
+                          <td style={{padding:"6px 8px",textAlign:"right",color:T.warning}}>{tq}</td>
+                          <td style={{padding:"6px 8px",textAlign:"right",color:(qty-tq)>0?T.success:T.textMut}}>{Math.round((qty-tq)*100)/100}</td>
+                        </tr>;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            {Array.isArray(order.stages) && order.stages.length > 0 && (
+              <div>
+                <div style={{fontSize:12,fontWeight:600,color:T.textSec,marginBottom:6}}>Stages</div>
+                <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                  {order.stages.map((s,i) => {
+                    const tagged = Array.isArray(s.taggedEntries) ? s.taggedEntries : [];
+                    const done = tagged.length > 0;
+                    return <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 8px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+                      <Icon name={done?"check":"clock"} size={12} color={done?T.success:T.textMut}/>
+                      <span style={{fontSize:12,color:T.text,flex:1}}>{s.name}</span>
+                      <span style={{fontSize:11,color:done?T.success:T.textMut}}>{done?`${tagged.length} tagged`:"pending"}</span>
+                    </div>;
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -2152,7 +2285,7 @@ function LinkedDropdown({ entries, value, onChange, checklistName, sourceCheckli
                   <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap"}}>
                     {e.person&&<span style={{fontSize:11,color:T.textMut}}>by {e.person}</span>}
                     {e.date&&<span style={{fontSize:11,color:T.textMut}}>{e.date}</span>}
-                    {e.orderId&&e.orderId!=="UNTAGGED"&&<span style={{fontSize:11,color:T.textMut}}>Order: {e.orderId}</span>}
+                    {e.orderId&&e.orderId!=="UNTAGGED"&&<span style={{fontSize:11,color:T.textMut}}>Order: <span style={{color:T.accent,fontWeight:500}}>{e.orderId}</span></span>}
                   </div>
                 </button>;
               })
@@ -2223,6 +2356,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   },[selCkId]);
 
   const isMultiBatchRoast = selCkId === "ck_roasted_beans";
+  const hasValidRoastBatches = isMultiBatchRoast && roastBatches.some(b => b.sourceAutoId && (parseFloat(b.inputQty) || 0) > 0);
 
   const orderOptions=[{label:"Untagged (no order)",value:""},...orders.filter(o=>o.canTag!==false&&o.status!=="delivered"&&o.status!=="cancelled").map(o=>({label:`${o.id} — ${o.name}`,value:o.id}))];
 
@@ -2239,15 +2373,20 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
         computedResponsesForInv[qi] = formData.responses[qi] !== undefined ? formData.responses[qi] : "";
       }
     });
-    const invCheck = validateRequiredInventoryFields(nq, computedResponsesForInv, formData.batchAllocations);
-    if (!invCheck.ok) {
-      setInvError({idx: invCheck.firstIdx, message: invCheck.message});
-      setSubmitting(false);return;
+    // When multi-batch roast is active with valid batches, skip inventory field validation
+    // — RoastBatchSection handles all inventory tracking for those fields
+    if (!hasValidRoastBatches) {
+      const invCheck = validateRequiredInventoryFields(nq, computedResponsesForInv, formData.batchAllocations);
+      if (!invCheck.ok) {
+        setInvError({idx: invCheck.firstIdx, message: invCheck.message});
+        setSubmitting(false);return;
+      }
     }
-    // Validate linked dropdown fields
+    // Validate linked dropdown fields (skip for multi-batch roast — source batches handled by RoastBatchSection)
     for(let qi=0;qi<nq.length;qi++){
       const q=nq[qi];
       if(q.linkedSource&&q.linkedSource.checklistId){
+        if (isMultiBatchRoast && q.linkedSource.checklistId === "ck_green_beans" && hasValidRoastBatches) continue;
         const entries=approvedEntries[q.linkedSource.checklistId]||[];
         const srcCk=checklists.find(c=>c.id===q.linkedSource.checklistId);
         const srcName=srcCk?.name||"source checklist";
@@ -2255,8 +2394,6 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
           alert("Cannot submit — no approved entries available from \""+srcName+"\". Please complete and approve a "+srcName+" first.");
           setSubmitting(false);return;
         }
-        // Check if value is satisfied via either the direct response (LinkedDropdown)
-        // or via batch allocations (BatchSelector) — at least one valid batch entry
         const hasDirectValue = (formData.responses[qi]||"").trim();
         const batchAllocs = formData.batchAllocations?.[qi];
         const hasValidBatch = Array.isArray(batchAllocs) && batchAllocs.some(a => a.sourceAutoId && (parseFloat(a.quantity) || 0) > 0);
@@ -2479,8 +2616,8 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
             let idealVal=null;
             if(q.ideal) idealVal=evaluateFormula(q.ideal,getFieldValue);
             const needsRemark=q.remarkCondition&&idealVal!==null&&checkRemarkCondition(currentVal,idealVal,q.remarkCondition);
-            const required = isInventoryRequiredQuestion(q);
-            const invalid = invError.idx === qi;
+            const required = isInventoryRequiredQuestion(q) && !(isMultiBatchRoast && hasValidRoastBatches);
+            const invalid = invError.idx === qi && !hasValidRoastBatches;
             return (
               <div key={qi} style={invalid ? {border:`1px solid ${T.danger}`,borderRadius:T.radSm,padding:8} : undefined}>
                 {required && (
@@ -4047,7 +4184,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
               {order.orderTypeDetail&&<Badge variant={order.orderTypeDetail==="Sample Order"?"danger":"success"}>{order.orderTypeDetail}</Badge>}
               {order.productType&&(()=>{const ptc=PRODUCT_TYPE_COLORS[order.productType]||PRODUCT_TYPE_COLORS.Others;return <span style={{display:"inline-flex",alignItems:"center",padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:500,background:ptc.bg,color:ptc.color,border:`1px solid ${ptc.border}`,whiteSpace:"nowrap"}}>{order.productType}</span>})()}
             </div>
-            <span style={{fontSize:12,color:T.textMut}}>{new Date(order.createdAt).toLocaleDateString("en-US",{year:"numeric",month:"short",day:"numeric"})}</span>
+            <span style={{fontSize:12,color:T.textMut}}>{formatDate(order.createdAt)}</span>
 
             {/* ── Status Workflow ── */}
             {(()=>{
@@ -4376,7 +4513,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
                   <div><span style={{fontSize:14,fontWeight:500,color:T.text}}>{ck.name}</span>
                     <div style={{display:"flex",gap:8,marginTop:2}}>
                       {item.completedBy&&<span style={{fontSize:11,color:T.textMut}}>by {item.completedBy}</span>}
-                      {item.completedAt&&<span style={{fontSize:11,color:T.textMut}}>{new Date(item.completedAt).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>}
+                      {item.completedAt&&<span style={{fontSize:11,color:T.textMut}}>{formatDateTime(item.completedAt)}</span>}
                     </div>
                   </div>
                 </div>
@@ -4395,7 +4532,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
                     {viewData.person&&<div><span style={{fontSize:11,color:T.textMut,display:"block"}}>Person</span><span style={{fontSize:13,color:T.textSec}}>{viewData.person}</span></div>}
                   </div>}
                   {viewData.lastEditedBy && viewData.lastEditedAt && (
-                    <div style={{fontSize:11,color:T.textMut,marginBottom:10}}>Last edited by <b style={{color:T.textSec}}>{viewData.lastEditedBy}</b> at {new Date(viewData.lastEditedAt).toLocaleString()}</div>
+                    <div style={{fontSize:11,color:T.textMut,marginBottom:10}}>Last edited by <b style={{color:T.textSec}}>{viewData.lastEditedBy}</b> at {formatDateTime(viewData.lastEditedAt)}</div>
                   )}
                   <div style={{background:T.bg,borderRadius:T.radSm,padding:"10px 12px",maxHeight:300,overflowY:"auto"}}>
                     {normalizeQuestions(ck.questions).map((q,qi)=>{
@@ -4581,7 +4718,7 @@ function EditResponseView({ orderChecklistId, checklistId, checklists, approvedE
         )}
         {meta.lastEditedBy && meta.lastEditedAt && (
           <div style={{marginTop:8,fontSize:11,color:T.textMut}}>
-            Last edited by <b style={{color:T.textSec}}>{meta.lastEditedBy}</b> at {new Date(meta.lastEditedAt).toLocaleString()}
+            Last edited by <b style={{color:T.textSec}}>{meta.lastEditedBy}</b> at {formatDateTime(meta.lastEditedAt)}
           </div>
         )}
       </div>
@@ -4705,7 +4842,7 @@ function ResponsesLogView({ checklists, inventoryItems, isAdmin, addToast, onEdi
                       {entry.editedAt && <Badge variant="muted" style={{fontSize:9,padding:"1px 6px"}}>Edited</Badge>}
                     </div>
                     {entry.editedBy && entry.editedAt && (
-                      <div style={{fontSize:10,color:T.textMut,marginTop:2}}>Last edited by {entry.editedBy} at {new Date(entry.editedAt).toLocaleString()}</div>
+                      <div style={{fontSize:10,color:T.textMut,marginTop:2}}>Last edited by {entry.editedBy} at {formatDateTime(entry.editedAt)}</div>
                     )}
                   </div>
                   <Icon name="chevron" size={16} color={T.textMut} style={{transform:isExpanded?"rotate(90deg)":"rotate(0)",transition:"transform .2s",flexShrink:0,marginTop:4}}/>
@@ -4852,7 +4989,7 @@ function AuditLogSection() {
             <div key={e.id} style={{background:T.card,borderRadius:T.radSm,border:`1px solid ${T.border}`,overflow:"hidden"}}>
               <button onClick={()=>setExpandedId(expandedId===e.id?null:e.id)}
                 style={{width:"100%",padding:"8px 12px",background:"none",border:"none",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontSize:10,fontFamily:T.mono,color:T.textMut,minWidth:60}}>{e.timestamp?new Date(e.timestamp).toLocaleDateString("en-US",{month:"short",day:"numeric"}):""}</span>
+                <span style={{fontSize:10,fontFamily:T.mono,color:T.textMut,minWidth:60}}>{formatDate(e.timestamp)}</span>
                 <Badge variant="muted" style={{background:actionColors[e.action]?actionColors[e.action]+"20":"transparent",color:actionColors[e.action]||T.textSec,fontSize:10}}>{e.action}</Badge>
                 <span style={{fontSize:12,fontFamily:T.mono,color:T.accent,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.entityId}</span>
                 <span style={{fontSize:11,color:T.textMut}}>{e.performedBy}</span>
@@ -4860,7 +4997,7 @@ function AuditLogSection() {
               {expandedId === e.id && (
                 <div style={{padding:"8px 12px",background:T.bg,borderTop:`1px solid ${T.border}`,fontSize:12}}>
                   <div style={{color:T.textMut,marginBottom:4}}>
-                    <b>Time:</b> {e.timestamp ? new Date(e.timestamp).toLocaleString() : "—"}
+                    <b>Time:</b> {formatDateTime(e.timestamp)}
                   </div>
                   <div style={{color:T.textMut,marginBottom:4}}><b>Type:</b> {e.entityType}</div>
                   {e.details && <div style={{color:T.textSec,whiteSpace:"pre-wrap",fontFamily:T.mono,fontSize:11,maxHeight:200,overflowY:"auto",background:T.surfaceHover,padding:8,borderRadius:T.radSm,marginTop:4}}>{e.details}</div>}
@@ -5203,7 +5340,7 @@ function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEdi
               <div key={a.id} style={{background:T.card,borderRadius:T.radSm,padding:"10px 14px",border:`1px solid ${T.border}`,fontSize:13}}>
                 <span style={{color:T.accent,fontWeight:500}}>{a.ordersCount} orders</span>
                 <span style={{color:T.textMut}}> archived on </span>
-                <span style={{color:T.textSec}}>{new Date(a.createdAt).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</span>
+                <span style={{color:T.textSec}}>{formatDate(a.createdAt)}</span>
                 <span style={{color:T.textMut}}> by {a.createdBy}</span>
               </div>
             ))}
