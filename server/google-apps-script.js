@@ -2030,6 +2030,10 @@ function handleSubmitChecklist(body, user) {
     // Fill summary quantities into template fields so they are persisted and readable
     var totalIn = 0, totalOut = 0;
     for (var ti = 0; ti < rbValidation.processed.length; ti++) { totalIn += rbValidation.processed[ti].inputQty; totalOut += rbValidation.processed[ti].outputQty; }
+    // Fill Type of Beans (index 2) from first batch so downstream grinding can resolve it
+    if (respArray.length > 2 && rbValidation.processed.length > 0 && rbValidation.processed[0].beanRef) {
+      respArray[2] = String(rbValidation.processed[0].beanRef);
+    }
     if (respArray.length > 3) respArray[3] = String(totalIn);   // Quantity input
     if (respArray.length > 4) respArray[4] = String(totalOut);  // Quantity output
     if (respArray.length > 6) respArray[6] = String(Math.round((totalIn - totalOut) * 100) / 100); // Loss in weight
@@ -2609,13 +2613,18 @@ function handleSubmitUntagged(body, user) {
     if (respArray.length > 0) respArray[0] = batchesJsonUt;
     var utTotalIn = 0, utTotalOut = 0;
     for (var uti = 0; uti < utRbVal.processed.length; uti++) { utTotalIn += utRbVal.processed[uti].inputQty; utTotalOut += utRbVal.processed[uti].outputQty; }
+    // Fill Type of Beans (index 2) from first batch's bean reference so downstream grinding can resolve it
+    if (respArray.length > 2 && utRbVal.processed.length > 0 && utRbVal.processed[0].beanRef) {
+      respArray[2] = String(utRbVal.processed[0].beanRef);
+    }
     if (respArray.length > 3) respArray[3] = String(utTotalIn);
     if (respArray.length > 4) respArray[4] = String(utTotalOut);
     if (respArray.length > 6) respArray[6] = String(Math.round((utTotalIn - utTotalOut) * 100) / 100);
     // Also update the stored responses in UntaggedChecklists so batch data is in both places
     var storedResponses = safeParseJSON(obj.responses, []);
     for (var sri = 0; sri < storedResponses.length; sri++) {
-      if (storedResponses[sri].questionText === "Shipment number used" || storedResponses[sri].questionIndex === 0) { storedResponses[sri].response = batchesJsonUt; break; }
+      if (storedResponses[sri].questionText === "Shipment number used" || storedResponses[sri].questionIndex === 0) storedResponses[sri].response = batchesJsonUt;
+      if (storedResponses[sri].questionText === "Type of Beans" && utRbVal.processed.length > 0) storedResponses[sri].response = utRbVal.processed[0].beanRef || "";
     }
     obj.responses = JSON.stringify(storedResponses);
     var utIdxForUpdate = findRowIndex(SHEETS.UNTAGGED_CHECKLISTS, id);
@@ -3937,6 +3946,7 @@ function handleRunTests(user) {
     var rbResp = rbNq.map(function(q, qi) {
       if (q.text === "Date of Roast") return { questionIndex: qi, questionText: q.text, response: "2026-01-03" };
       if (q.text === "Roast profile") return { questionIndex: qi, questionText: q.text, response: "Medium" };
+      if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
       if (q.text === "Roast Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
       return { questionIndex: qi, questionText: q.text, response: "" };
     });
@@ -3978,6 +3988,7 @@ function handleRunTests(user) {
   var t5Checks = [], rb2UtId = "";
   try {
     var rbResp5 = rbNq.map(function(q, qi) {
+      if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
       if (q.text === "Roast Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
       return { questionIndex: qi, questionText: q.text, response: "" };
     });
