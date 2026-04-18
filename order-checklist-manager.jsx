@@ -5202,6 +5202,74 @@ function ClassificationsSection({ addToast }) {
 
 // ─── Test Runner Section ─────────────────────────────────────
 
+function DataRepairTools({ addToast }) {
+  const [fixingLedger, setFixingLedger] = useState(false);
+  const [ledgerResult, setLedgerResult] = useState(null);
+  const [recalcing, setRecalcing] = useState(false);
+  const [recalcResult, setRecalcResult] = useState(null);
+
+  const fixLedger = async () => {
+    setFixingLedger(true);
+    try {
+      const r = await API.post("fixLedgerMisalignment", {});
+      setLedgerResult(r);
+      if (addToast) addToast("Ledger alignment check complete", "success");
+    } catch (e) { if (addToast) addToast(e.message, "error"); }
+    setFixingLedger(false);
+  };
+
+  const recalcBalances = async () => {
+    setRecalcing(true);
+    try {
+      const r = await API.post("recalculateInventoryBalances", {});
+      setRecalcResult(r);
+      if (addToast) addToast("Inventory balances recalculated", "success");
+    } catch (e) { if (addToast) addToast(e.message, "error"); }
+    setRecalcing(false);
+  };
+
+  return (
+    <div style={{marginTop:12,padding:12,background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+      <span style={{fontSize:12,fontWeight:600,color:T.textSec,display:"block",marginBottom:8}}>Data Repair Tools</span>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <Btn small variant="ghost" onClick={fixLedger} disabled={fixingLedger}>
+          {fixingLedger ? "Checking..." : "Fix Ledger Alignment"}
+        </Btn>
+        <Btn small variant="ghost" onClick={recalcBalances} disabled={recalcing}>
+          {recalcing ? "Recalculating..." : "Recalculate Inventory Balances"}
+        </Btn>
+      </div>
+      {ledgerResult && (
+        <div style={{marginTop:8,fontSize:11,color:T.textMut}}>
+          Ledger: {ledgerResult.rowsFixed || 0} misaligned rows detected. {ledgerResult.note || ""}
+        </div>
+      )}
+      {recalcResult && recalcResult.results && (
+        <div style={{marginTop:8,maxHeight:200,overflowY:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+            <thead><tr style={{background:T.surfaceHover}}>
+              <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Item</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Old</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>New</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Entries</th>
+            </tr></thead>
+            <tbody>{recalcResult.results.map((r, i) => {
+              const changed = r.oldBalance !== r.newBalance;
+              return <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:changed?T.warningBg:"transparent"}}>
+                <td style={{padding:"4px 6px",color:T.text}}>{r.itemName}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",color:changed?T.danger:T.textMut}}>{r.oldBalance}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",color:changed?T.success:T.textMut}}>{r.newBalance}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>{r.entriesProcessed}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+          <div style={{fontSize:10,color:T.textMut,marginTop:4}}>{recalcResult.itemsProcessed} items processed</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TestRunnerSection({ addToast }) {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState(null);
@@ -5290,6 +5358,8 @@ function TestRunnerSection({ addToast }) {
           </div>
         </div>
       )}
+      {/* Data Repair Tools */}
+      <DataRepairTools addToast={addToast}/>
     </div>
   );
 }
