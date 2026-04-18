@@ -889,6 +889,15 @@ function doPost(e) {
       case "consolidateDuplicateItems":
         var eCDI = requireAdmin(user); if (eCDI) return jsonResponse(eCDI);
         return jsonResponse(consolidateDuplicateInventoryItems());
+      case "getReconciliationReport":
+        var eRR = requireAdmin(user); if (eRR) return jsonResponse(eRR);
+        return jsonResponse(handleGetReconciliationReport());
+      case "fixAllDiscrepancies":
+        var eFD = requireAdmin(user); if (eFD) return jsonResponse(eFD);
+        return jsonResponse(handleFixAllDiscrepancies(user));
+      case "cleanTestData":
+        var eCT = requireAdmin(user); if (eCT) return jsonResponse(eCT);
+        return jsonResponse(handleCleanTestContamination());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -3329,6 +3338,7 @@ function handleGetInventoryLedger(params) {
       referenceType: r.reference_type, referenceId: r.reference_id,
       notes: r.notes, doneBy: r.done_by, createdAt: r.created_at,
       classificationId: r.classification_id || "",
+      classificationLabel: lookupClassificationLabel(r.classification_id),
     };
   });
 }
@@ -4113,6 +4123,163 @@ function consolidateDuplicateInventoryItems() {
     for (var ai = 0; ai < activeItems.length; ai++) recalculateInventoryBalance(activeItems[ai].id);
   }
   return { duplicatesConsolidated: consolidated, ledgerEntriesMoved: ledgersMoved };
+}
+
+// ─── Reconciliation Report ───────────────────────────────────
+
+function handleGetReconciliationReport() {
+  ensureSheetHasAllColumns(SHEETS.INVENTORY_ITEMS);
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  var items = getRows(SHEETS.INVENTORY_ITEMS).filter(function(it) { return it.is_active !== "false"; });
+  var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var catMap = { "ck_green_beans": "Green Beans", "ck_roasted_beans": "Roasted Beans", "ck_grinding": "Packing Items" };
+  var reportItems = [];
+  var totalDisc = 0, discCount = 0;
+
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var cat = String(item.category || "");
+    var entries = [];
+    var utRemaining = 0;
+
+    for (var u = 0; u < utRows.length; u++) {
+      var ut = utRows[u];
+      if (isDeleted(ut)) continue;
+      var utCat = catMap[ut.checklist_id] || "";
+      if (utCat !== cat) continue;
+      var utTotal = parseFloat(ut.total_quantity) || 0;
+      if (utTotal <= 0) continue;
+      var utAlloc = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
+      var rem = Math.max(0, utTotal - utAlloc);
+      utRemaining += rem;
+      entries.push({ autoId: ut.auto_id || "", totalQty: utTotal, allocated: utAlloc, remaining: rem, date: ut.date || "", person: ut.person || "" });
+    }
+
+    var ledgerBalance = parseFloat(item.current_stock) || 0;
+    var disc = Math.round((ledgerBalance - utRemaining) * 100) / 100;
+    if (Math.abs(disc) > 0.01) discCount++;
+    totalDisc += Math.abs(disc);
+
+    reportItems.push({
+      itemId: item.id, itemName: item.name, category: cat,
+      classification: lookupClassificationLabel(item.classification_id),
+      ledgerBalance: ledgerBalance, untaggedRemaining: utRemaining,
+      discrepancy: disc, status: Math.abs(disc) <= 0.01 ? "OK" : "DISCREPANCY",
+      entries: entries,
+    });
+  }
+
+  return {
+    items: reportItems,
+    summary: { totalItems: reportItems.length, itemsWithDiscrepancy: discCount, totalDiscrepancy: Math.round(totalDisc * 100) / 100 },
+  };
+}
+
+function handleFixAllDiscrepancies(user) {
+  var report = handleGetReconciliationReport();
+  var fixed = 0, adjustments = 0;
+  for (var i = 0; i < report.items.length; i++) {
+    var ri = report.items[i];
+    if (ri.status === "OK") continue;
+    var delta = ri.untaggedRemaining - ri.ledgerBalance;
+    // Update current_stock
+    var itemIdx = findRowIndex(SHEETS.INVENTORY_ITEMS, ri.itemId);
+    if (itemIdx < 0) continue;
+    var rows = getRows(SHEETS.INVENTORY_ITEMS);
+    var item = null;
+    for (var j = 0; j < rows.length; j++) { if (String(rows[j].id) === String(ri.itemId)) { item = rows[j]; break; } }
+    if (!item) continue;
+    item.current_stock = ri.untaggedRemaining;
+    updateSheetRow(SHEETS.INVENTORY_ITEMS, itemIdx, item);
+    // Write adjustment ledger entry
+    appendToSheet(SHEETS.INVENTORY_LEDGER, {
+      id: "led_" + nextId(), item_id: ri.itemId, item_name: ri.itemName,
+      category: ri.category, date: new Date().toISOString().split("T")[0], type: "ADJUSTMENT",
+      quantity: delta, balance_after: ri.untaggedRemaining,
+      reference_type: "reconciliation", reference_id: "",
+      notes: "Reconciliation: corrected " + ri.ledgerBalance + " → " + ri.untaggedRemaining + " based on untagged entries",
+      done_by: user.displayName || user.username, created_at: new Date().toISOString(),
+    });
+    adjustments++;
+    fixed++;
+  }
+  invalidateCache(SHEETS.INVENTORY_ITEMS);
+  invalidateCache(SHEETS.INVENTORY_LEDGER);
+  writeAuditLog(user, "reconciliation", "Inventory", "", "Fixed " + fixed + " items, " + adjustments + " adjustments");
+  return { itemsFixed: fixed, adjustmentsMade: adjustments };
+}
+
+// ─── Test Data Cleanup ──────────────────────────────────────
+
+function handleCleanTestContamination() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var result = { ledgerDeleted: 0, itemsDeleted: 0, untaggedDeleted: 0, allocationsDeleted: 0 };
+
+  // 1. Delete test ledger rows
+  var ledSheet = ss.getSheetByName(SHEETS.INVENTORY_LEDGER);
+  if (ledSheet && ledSheet.getLastRow() > 1) {
+    var ld = ledSheet.getDataRange().getValues();
+    var lh = ld[0].map(String);
+    var lDoneBy = lh.indexOf("done_by"), lItemName = lh.indexOf("item_name");
+    for (var lr = ld.length - 1; lr >= 1; lr--) {
+      if ((lDoneBy >= 0 && String(ld[lr][lDoneBy]) === "TEST_RUNNER") || (lItemName >= 0 && String(ld[lr][lItemName]).indexOf("TEST_") === 0)) {
+        ledSheet.deleteRow(lr + 1); result.ledgerDeleted++;
+      }
+    }
+  }
+  // 2. Delete test inventory items
+  var invSheet = ss.getSheetByName(SHEETS.INVENTORY_ITEMS);
+  if (invSheet && invSheet.getLastRow() > 1) {
+    var id2 = invSheet.getDataRange().getValues();
+    var ih = id2[0].map(String);
+    var iName = ih.indexOf("name"), iAbbr = ih.indexOf("abbreviation");
+    var testAbbrs = ["TGBI", "TRBI", "TPKI"];
+    for (var ir = id2.length - 1; ir >= 1; ir--) {
+      if ((iName >= 0 && String(id2[ir][iName]).indexOf("TEST_") === 0) || (iAbbr >= 0 && testAbbrs.indexOf(String(id2[ir][iAbbr]).toUpperCase()) >= 0)) {
+        invSheet.deleteRow(ir + 1); result.itemsDeleted++;
+      }
+    }
+  }
+  // 3. Soft-delete test untagged entries
+  var utSheet = ss.getSheetByName(SHEETS.UNTAGGED_CHECKLISTS);
+  if (utSheet && utSheet.getLastRow() > 1) {
+    var ud = utSheet.getDataRange().getValues();
+    var uh = ud[0].map(String);
+    var uPerson = uh.indexOf("person"), uDeleted = uh.indexOf("is_deleted");
+    for (var ur = ud.length - 1; ur >= 1; ur--) {
+      if (uPerson >= 0 && String(ud[ur][uPerson]) === "TEST_RUNNER") {
+        if (uDeleted >= 0) utSheet.getRange(ur + 1, uDeleted + 1).setValue("true");
+        result.untaggedDeleted++;
+      }
+    }
+  }
+  // 4. Delete test allocations
+  var qaSheet = ss.getSheetByName(SHEETS.QUANTITY_ALLOCATIONS);
+  if (qaSheet && qaSheet.getLastRow() > 1) {
+    var qd = qaSheet.getDataRange().getValues();
+    var qh = qd[0].map(String);
+    var qAllocBy = qh.indexOf("allocated_by");
+    for (var qr = qd.length - 1; qr >= 1; qr--) {
+      if (qAllocBy >= 0 && String(qd[qr][qAllocBy]) === "TEST_RUNNER") {
+        qaSheet.deleteRow(qr + 1); result.allocationsDeleted++;
+      }
+    }
+  }
+  // 5. Clean response tabs
+  var tabs = ["Green Bean QC Sample Check", "Green Beans Quality Check", "Roasted Beans Quality Check", "Grinding & Packing Checklist"];
+  for (var t = 0; t < tabs.length; t++) {
+    var ts = ss.getSheetByName(tabs[t]);
+    if (ts && ts.getLastRow() > 2) {
+      var td = ts.getDataRange().getValues();
+      for (var tr = td.length - 1; tr >= 2; tr--) {
+        if (String(td[tr][3] || "") === "TEST_RUNNER") ts.deleteRow(tr + 1);
+      }
+    }
+  }
+  clearRowsCache();
+  // 6. Recalculate all balances
+  recalculateAllInventoryBalances();
+  return result;
 }
 
 // ─── Automated Test Suite ────────────────────────────────────
