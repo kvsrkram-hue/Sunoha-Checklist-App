@@ -1656,8 +1656,14 @@ function applyLegacyInventoryForChecklist(ck, respMap, refType, refId, person, f
       if (roastCk) {
         var roastSub = findSubmissionByAutoId(roastAutoId, roastCk);
         if (roastSub && roastSub.responses) {
-          // "Type of Beans" is field index 2 on ck_roasted_beans
-          beanRefG = roastSub.responses[2] || "";
+          // Read by question text (immune to template reordering), fallback to index scan
+          var rbQuestions = roastCk.questions || [];
+          for (var rqi = 0; rqi < rbQuestions.length; rqi++) {
+            if (rbQuestions[rqi].text === "Type of Beans" || rbQuestions[rqi].text === "Type of Bean") {
+              beanRefG = roastSub.responses[rqi] || roastSub.responses[String(rqi)] || "";
+              break;
+            }
+          }
         }
       }
     }
@@ -2034,13 +2040,15 @@ function handleSubmitChecklist(body, user) {
     // Fill summary quantities into template fields so they are persisted and readable
     var totalIn = 0, totalOut = 0;
     for (var ti = 0; ti < rbValidation.processed.length; ti++) { totalIn += rbValidation.processed[ti].inputQty; totalOut += rbValidation.processed[ti].outputQty; }
-    // Fill Type of Beans (index 2) from first batch so downstream grinding can resolve it
-    if (respArray.length > 2 && rbValidation.processed.length > 0 && rbValidation.processed[0].beanRef) {
-      respArray[2] = String(rbValidation.processed[0].beanRef);
+    // Fill Type of Beans and summary fields by question text lookup (immune to template reordering)
+    var rbNqSubmit = ck.questions || [];
+    for (var rfsi = 0; rfsi < rbNqSubmit.length && rfsi < respArray.length; rfsi++) {
+      var rqtSubmit = rbNqSubmit[rfsi].text || "";
+      if ((rqtSubmit === "Type of Beans" || rqtSubmit === "Type of Bean") && rbValidation.processed.length > 0 && rbValidation.processed[0].beanRef) respArray[rfsi] = String(rbValidation.processed[0].beanRef);
+      if (rqtSubmit === "Quantity input") respArray[rfsi] = String(totalIn);
+      if (rqtSubmit === "Quantity output") respArray[rfsi] = String(totalOut);
+      if (rqtSubmit === "Loss in weight") respArray[rfsi] = String(Math.round((totalIn - totalOut) * 100) / 100);
     }
-    if (respArray.length > 3) respArray[3] = String(totalIn);   // Quantity input
-    if (respArray.length > 4) respArray[4] = String(totalOut);  // Quantity output
-    if (respArray.length > 6) respArray[6] = String(Math.round((totalIn - totalOut) * 100) / 100); // Loss in weight
     // Write response row with batch data embedded
     writeResponseRow(ck.name, ck.questions, {
       orderId: String(oc.order_id), orderName: order ? order.name : "", customer: customerLabel,
@@ -2617,18 +2625,20 @@ function handleSubmitUntagged(body, user) {
     if (respArray.length > 0) respArray[0] = batchesJsonUt;
     var utTotalIn = 0, utTotalOut = 0;
     for (var uti = 0; uti < utRbVal.processed.length; uti++) { utTotalIn += utRbVal.processed[uti].inputQty; utTotalOut += utRbVal.processed[uti].outputQty; }
-    // Fill Type of Beans (index 2) from first batch's bean reference so downstream grinding can resolve it
-    if (respArray.length > 2 && utRbVal.processed.length > 0 && utRbVal.processed[0].beanRef) {
-      respArray[2] = String(utRbVal.processed[0].beanRef);
+    // Fill Type of Beans and summary quantities by question text lookup (immune to template reordering)
+    var rbNqUt = ck.questions || [];
+    for (var rfi = 0; rfi < rbNqUt.length && rfi < respArray.length; rfi++) {
+      var rqText = rbNqUt[rfi].text || "";
+      if ((rqText === "Type of Beans" || rqText === "Type of Bean") && utRbVal.processed.length > 0 && utRbVal.processed[0].beanRef) respArray[rfi] = String(utRbVal.processed[0].beanRef);
+      if (rqText === "Quantity input") respArray[rfi] = String(utTotalIn);
+      if (rqText === "Quantity output") respArray[rfi] = String(utTotalOut);
+      if (rqText === "Loss in weight") respArray[rfi] = String(Math.round((utTotalIn - utTotalOut) * 100) / 100);
     }
-    if (respArray.length > 3) respArray[3] = String(utTotalIn);
-    if (respArray.length > 4) respArray[4] = String(utTotalOut);
-    if (respArray.length > 6) respArray[6] = String(Math.round((utTotalIn - utTotalOut) * 100) / 100);
     // Also update the stored responses in UntaggedChecklists so batch data is in both places
     var storedResponses = safeParseJSON(obj.responses, []);
     for (var sri = 0; sri < storedResponses.length; sri++) {
-      if (storedResponses[sri].questionText === "Shipment number used" || storedResponses[sri].questionIndex === 0) storedResponses[sri].response = batchesJsonUt;
-      if (storedResponses[sri].questionText === "Type of Beans" && utRbVal.processed.length > 0) storedResponses[sri].response = utRbVal.processed[0].beanRef || "";
+      if (storedResponses[sri].questionText === "Shipment number used") storedResponses[sri].response = batchesJsonUt;
+      if ((storedResponses[sri].questionText === "Type of Beans" || storedResponses[sri].questionText === "Type of Bean") && utRbVal.processed.length > 0) storedResponses[sri].response = utRbVal.processed[0].beanRef || "";
     }
     obj.responses = JSON.stringify(storedResponses);
     var utIdxForUpdate = findRowIndex(SHEETS.UNTAGGED_CHECKLISTS, id);
@@ -2693,15 +2703,6 @@ function handleSubmitUntagged(body, user) {
       obj.tagged_order_id = orderId;
       updateSheetRow(SHEETS.UNTAGGED_CHECKLISTS, utIdx, obj);
     }
-  }
-
-  // ── Inventory transactions for untagged submissions (legacy path; only when no inventoryLink) ──
-  if (!hasInventoryLinkQuestionsUt) {
-    var respMap2 = {};
-    for (var ri2 = 0; ri2 < responses.length; ri2++) {
-      respMap2[responses[ri2].questionText] = responses[ri2].response || "";
-    }
-    applyLegacyInventoryForChecklist(ck, respMap2, "checklist", id, person, body.inventoryItemId || "", body.inventoryOutputItemId || "", false, body.grindClassificationId || "");
   }
 
   writeAuditLog(user, "submit_untagged", "UntaggedChecklist", id, ck.name + (autoId ? " [" + autoId + "]" : "") + (orderId ? " (tagged to " + orderId + ")" : ""));
