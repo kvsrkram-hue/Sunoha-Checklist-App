@@ -166,8 +166,12 @@ function findRowIndex(sheetName, id) {
 function appendToSheet(sheetName, obj) {
   var sheet = getSheet(sheetName);
   var headers = HEADERS[sheetName];
+  if (!headers) { Logger.log("appendToSheet: NO HEADERS for " + sheetName); return; }
   var row = headers.map(function(h) { return obj[h] !== undefined ? obj[h] : ""; });
   sheet.appendRow(row);
+  if (sheetName === "InventoryLedger") {
+    Logger.log("appendToSheet LEDGER: type=" + obj.type + " qty=" + obj.quantity + " item=" + obj.item_name + " ref=" + obj.reference_id + " doneBy=" + obj.done_by);
+  }
   invalidateCache(sheetName);
 }
 
@@ -3847,6 +3851,8 @@ function handleRunTests(user) {
   var testUser = { id: user.id, username: user.username, displayName: "TEST_RUNNER", role: "admin" };
   var results = [];
   var testIds = { items: [], untagged: [], ledger: [], allocations: [], classifications: [], auditStart: new Date().toISOString() };
+  var diagLog = [];
+  function diag(msg) { diagLog.push(msg); Logger.log("[TEST DIAG] " + msg); }
 
   function check(desc, actual, expected) {
     var pass = actual === expected;
@@ -3859,6 +3865,93 @@ function handleRunTests(user) {
     var pass = val >= min;
     return { check: desc, result: pass ? "PASS" : "FAIL", detail: val + (pass ? " >= " : " < ") + min };
   }
+
+  // ── PRE-CLEANUP: Remove any stale test data from previous runs ──
+  var preCleanCount = 0;
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var cleanSheets = [
+      { name: SHEETS.INVENTORY_ITEMS, col: 2, match: "TEST_" },
+      { name: SHEETS.ROAST_CLASSIFICATIONS, col: 1, match: "TEST_" },
+    ];
+    for (var cs = 0; cs < cleanSheets.length; cs++) {
+      var cSheet = ss.getSheetByName(cleanSheets[cs].name);
+      if (cSheet && cSheet.getLastRow() > 1) {
+        var cData = cSheet.getDataRange().getValues();
+        for (var cr = cData.length - 1; cr >= 1; cr--) {
+          if (String(cData[cr][cleanSheets[cs].col] || "").indexOf(cleanSheets[cs].match) === 0) { cSheet.deleteRow(cr + 1); preCleanCount++; }
+        }
+      }
+    }
+    // Clean untagged by person
+    var utClean = ss.getSheetByName(SHEETS.UNTAGGED_CHECKLISTS);
+    if (utClean && utClean.getLastRow() > 1) {
+      var utcData = utClean.getDataRange().getValues();
+      var utcHeaders = utcData[0].map(String);
+      var utcPersonCol = utcHeaders.indexOf("person");
+      for (var ucr = utcData.length - 1; ucr >= 1; ucr--) {
+        if (utcPersonCol >= 0 && String(utcData[ucr][utcPersonCol]) === "TEST_RUNNER") { utClean.deleteRow(ucr + 1); preCleanCount++; }
+      }
+    }
+    // Clean ledger by done_by
+    var ledClean = ss.getSheetByName(SHEETS.INVENTORY_LEDGER);
+    if (ledClean && ledClean.getLastRow() > 1) {
+      var lcData = ledClean.getDataRange().getValues();
+      var lcHeaders = lcData[0].map(String);
+      var lcDoneByCol = lcHeaders.indexOf("done_by");
+      for (var lcr = lcData.length - 1; lcr >= 1; lcr--) {
+        if (lcDoneByCol >= 0 && String(lcData[lcr][lcDoneByCol]) === "TEST_RUNNER") { ledClean.deleteRow(lcr + 1); preCleanCount++; }
+      }
+    }
+    // Clean allocations by allocated_by
+    var qaClean = ss.getSheetByName(SHEETS.QUANTITY_ALLOCATIONS);
+    if (qaClean && qaClean.getLastRow() > 1) {
+      var qacData = qaClean.getDataRange().getValues();
+      var qacHeaders = qacData[0].map(String);
+      var qacAllocByCol = qacHeaders.indexOf("allocated_by");
+      for (var qcr = qacData.length - 1; qcr >= 1; qcr--) {
+        if (qacAllocByCol >= 0 && String(qacData[qcr][qacAllocByCol]) === "TEST_RUNNER") { qaClean.deleteRow(qcr + 1); preCleanCount++; }
+      }
+    }
+    // Clean per-checklist response tabs
+    var respTabNames = ["Green Bean QC Sample Check","Green Beans Quality Check","Roasted Beans Quality Check","Grinding & Packing Checklist"];
+    for (var rt = 0; rt < respTabNames.length; rt++) {
+      var rClean = ss.getSheetByName(respTabNames[rt]);
+      if (rClean && rClean.getLastRow() > 2) {
+        var rcData = rClean.getDataRange().getValues();
+        for (var rcr = rcData.length - 1; rcr >= 2; rcr--) {
+          if (String(rcData[rcr][3] || "") === "TEST_RUNNER") { rClean.deleteRow(rcr + 1); preCleanCount++; }
+        }
+      }
+    }
+    if (preCleanCount > 0) {
+      clearRowsCache();
+      diag("Pre-cleanup: removed " + preCleanCount + " stale test rows");
+    }
+  } catch (e) { diag("Pre-cleanup error: " + e.message); }
+
+  // ── ENVIRONMENT CHECK (Test 0) ──
+  var envChecks = [];
+  try {
+    clearRowsCache();
+    var envLedger = getRows(SHEETS.INVENTORY_LEDGER);
+    var envItems = getRows(SHEETS.INVENTORY_ITEMS);
+    var envUt = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+    envChecks.push({ check: "SHEETS.INVENTORY_LEDGER value", result: "INFO", detail: SHEETS.INVENTORY_LEDGER });
+    envChecks.push({ check: "SHEETS.INVENTORY_ITEMS value", result: "INFO", detail: SHEETS.INVENTORY_ITEMS });
+    envChecks.push({ check: "Existing ledger rows", result: "INFO", detail: String(envLedger.length) });
+    envChecks.push({ check: "Existing inventory items", result: "INFO", detail: String(envItems.length) });
+    envChecks.push({ check: "Existing untagged checklists", result: "INFO", detail: String(envUt.length) });
+    envChecks.push({ check: "Ledger column headers", result: "INFO", detail: envLedger.length > 0 ? JSON.stringify(Object.keys(envLedger[0])) : "no rows" });
+    envChecks.push({ check: "Items column headers", result: "INFO", detail: envItems.length > 0 ? JSON.stringify(Object.keys(envItems[0])) : "no rows" });
+    envChecks.push({ check: "Pre-cleanup rows removed", result: "INFO", detail: String(preCleanCount) });
+    // Verify sheet exists by trying to access it directly
+    var ledSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.INVENTORY_LEDGER);
+    envChecks.push({ check: "Ledger sheet found by name", result: ledSheet ? "PASS" : "FAIL", detail: ledSheet ? "rows=" + ledSheet.getLastRow() : "NOT FOUND" });
+    var itemSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEETS.INVENTORY_ITEMS);
+    envChecks.push({ check: "Items sheet found by name", result: itemSheet ? "PASS" : "FAIL", detail: itemSheet ? "rows=" + itemSheet.getLastRow() : "NOT FOUND" });
+  } catch (e) { envChecks.push({ check: "Environment check", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 0, testName: "Environment Check", status: "INFO", checks: envChecks });
 
   // ── TEST 1: Inventory Items ──
   var t1Checks = [];
@@ -3935,8 +4028,21 @@ function handleRunTests(user) {
       t3Checks.push(check("Ledger IN qty = 100", parseFloat(ledger3[0].quantity), 100));
       t3Checks.push(check("Ledger category = Green Beans", String(ledger3[0].category || "").trim(), "Green Beans"));
     }
+    // DIAGNOSTICS for Test 3
+    var diagAllLedger3 = getRows(SHEETS.INVENTORY_LEDGER);
+    var diagLast10 = diagAllLedger3.slice(-10).map(function(r) { return r.reference_id + "|" + r.type + "|" + r.quantity + "|" + r.item_id + "|" + r.done_by; });
+    t3Checks.push({ check: "DIAG: s3.id (searching for)", result: "INFO", detail: String(s3.id) });
+    t3Checks.push({ check: "DIAG: gbItem.id used", result: "INFO", detail: String(gbItem.id) });
+    t3Checks.push({ check: "DIAG: total ledger rows", result: "INFO", detail: String(diagAllLedger3.length) });
+    t3Checks.push({ check: "DIAG: last 10 ledger ref_ids", result: "INFO", detail: JSON.stringify(diagLast10) });
+    t3Checks.push({ check: "DIAG: s3 full response", result: "INFO", detail: JSON.stringify({ id: s3.id, autoId: s3.autoId, error: s3.error }) });
+    // Check if ck_green_beans has inventoryLink questions
+    var gbHasInvLink = gbNq.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
+    t3Checks.push({ check: "DIAG: GB has inventoryLink questions", result: "INFO", detail: String(gbHasInvLink) });
+    t3Checks.push({ check: "DIAG: GB question count", result: "INFO", detail: String(gbNq.length) });
+    t3Checks.push({ check: "DIAG: GB questions with invLink", result: "INFO", detail: JSON.stringify(gbNq.filter(function(q) { return q.inventoryLink; }).map(function(q) { return q.text + ":" + JSON.stringify(q.inventoryLink); })) });
   } catch (e) { t3Checks.push({ check: "GB QC submission", result: "FAIL", detail: e.message }); }
-  results.push({ testNumber: 3, testName: "Green Beans Quality Check", status: t3Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t3Checks });
+  results.push({ testNumber: 3, testName: "Green Beans Quality Check", status: t3Checks.filter(function(c){return c.result!=="INFO"}).every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t3Checks });
 
   // ── TEST 4: Roasted Beans QC (multi-batch) ──
   var t4Checks = [], rbAutoId = "", rbUtId = "";
@@ -3981,8 +4087,18 @@ function handleRunTests(user) {
     var gbAllocated = getAllocatedQuantityForAutoId(gbAutoId);
     t4Checks.push(check("GB allocated = 40", gbAllocated, 40));
     t4Checks.push(check("GB remaining = 60", 100 - gbAllocated, 60));
+    // DIAGNOSTICS for Test 4
+    var diagAllLedger4 = getRows(SHEETS.INVENTORY_LEDGER);
+    var diagLast10t4 = diagAllLedger4.slice(-10).map(function(r) { return r.reference_id + "|" + r.type + "|" + r.quantity + "|" + r.item_id; });
+    t4Checks.push({ check: "DIAG: s4.id", result: "INFO", detail: String(s4.id) });
+    t4Checks.push({ check: "DIAG: s4.error", result: "INFO", detail: String(s4.error || "none") });
+    t4Checks.push({ check: "DIAG: total ledger rows", result: "INFO", detail: String(diagAllLedger4.length) });
+    t4Checks.push({ check: "DIAG: last 10 ledger", result: "INFO", detail: JSON.stringify(diagLast10t4) });
+    t4Checks.push({ check: "DIAG: shipField response[0..50]", result: "INFO", detail: shipField ? String(shipField.response || "").substring(0, 50) : "NOT FOUND" });
+    t4Checks.push({ check: "DIAG: storedResp count", result: "INFO", detail: String(storedResp.length) });
+    t4Checks.push({ check: "DIAG: storedResp[0] text", result: "INFO", detail: storedResp.length > 0 ? String(storedResp[0].questionText) : "empty" });
   } catch (e) { t4Checks.push({ check: "RB QC multi-batch", result: "FAIL", detail: e.message }); }
-  results.push({ testNumber: 4, testName: "Roasted Beans QC (multi-batch)", status: t4Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t4Checks });
+  results.push({ testNumber: 4, testName: "Roasted Beans QC (multi-batch)", status: t4Checks.filter(function(c){return c.result!=="INFO"}).every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t4Checks });
 
   // ── TEST 5: Quantity Validation ──
   var t5Checks = [], rb2UtId = "";
@@ -4036,8 +4152,34 @@ function handleRunTests(user) {
     t6Checks.push(checkTruthy("Entry created", !!utRow6));
     var ledger6 = getRows(SHEETS.INVENTORY_LEDGER).filter(function(r) { return String(r.reference_id) === String(s6.id); });
     t6Checks.push(checkGte("Ledger entries created", ledger6.length, 1));
+    // DIAGNOSTICS for Test 6
+    var diagAllLedger6 = getRows(SHEETS.INVENTORY_LEDGER);
+    var diagLast10t6 = diagAllLedger6.slice(-10).map(function(r) { return r.reference_id + "|" + r.type + "|" + r.quantity + "|" + r.item_id + "|" + r.done_by; });
+    t6Checks.push({ check: "DIAG: s6.id", result: "INFO", detail: String(s6.id) });
+    t6Checks.push({ check: "DIAG: s6.error", result: "INFO", detail: String(s6.error || "none") });
+    t6Checks.push({ check: "DIAG: rbAutoId used as Roast ID", result: "INFO", detail: String(rbAutoId) });
+    t6Checks.push({ check: "DIAG: total ledger rows", result: "INFO", detail: String(diagAllLedger6.length) });
+    t6Checks.push({ check: "DIAG: last 10 ledger", result: "INFO", detail: JSON.stringify(diagLast10t6) });
+    // Check if grinding has inventoryLink
+    var grHasInvLink = grNq.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
+    t6Checks.push({ check: "DIAG: Grinding has inventoryLink", result: "INFO", detail: String(grHasInvLink) });
+    t6Checks.push({ check: "DIAG: Grinding question count", result: "INFO", detail: String(grNq.length) });
+    // Try to trace what the legacy path would do
+    try {
+      var diagRbCk = lookupChecklist("ck_roasted_beans");
+      var diagRbSub = diagRbCk ? findSubmissionByAutoId(rbAutoId, diagRbCk) : null;
+      var diagBeanRef = diagRbSub && diagRbSub.responses ? (diagRbSub.responses[2] || diagRbSub.responses["2"] || "") : "";
+      t6Checks.push({ check: "DIAG: RB submission found", result: "INFO", detail: diagRbSub ? "yes, responses keys=" + JSON.stringify(Object.keys(diagRbSub.responses || {})) : "NOT FOUND" });
+      t6Checks.push({ check: "DIAG: beanRef from RB[2]", result: "INFO", detail: String(diagBeanRef || "EMPTY") });
+      if (diagBeanRef) {
+        var diagResolveRB = findInventoryItemForCategory(diagBeanRef, "Roasted Beans");
+        var diagResolvePK = findInventoryItemForCategory(diagBeanRef, "Packing Items");
+        t6Checks.push({ check: "DIAG: RB resolve", result: "INFO", detail: diagResolveRB.item ? diagResolveRB.item.id : "NULL: " + diagResolveRB.warning });
+        t6Checks.push({ check: "DIAG: PK resolve", result: "INFO", detail: diagResolvePK.item ? diagResolvePK.item.id : "NULL: " + diagResolvePK.warning });
+      }
+    } catch (de) { t6Checks.push({ check: "DIAG: trace error", result: "INFO", detail: de.message }); }
   } catch (e) { t6Checks.push({ check: "Grinding submission", result: "FAIL", detail: e.message }); }
-  results.push({ testNumber: 6, testName: "Grinding & Packing", status: t6Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t6Checks });
+  results.push({ testNumber: 6, testName: "Grinding & Packing", status: t6Checks.filter(function(c){return c.result!=="INFO"}).every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t6Checks });
 
   // ── TEST 7: Soft Delete ──
   var t7Checks = [];
@@ -4255,6 +4397,7 @@ function handleRunTests(user) {
     failed: failed,
     results: results,
     cleanupSummary: { rowsDeleted: cleanupDeleted, sheetsAffected: sheetsAffected },
+    diagLog: diagLog,
   };
 }
 
