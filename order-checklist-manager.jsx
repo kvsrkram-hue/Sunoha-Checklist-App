@@ -5207,6 +5207,8 @@ function DataRepairTools({ addToast }) {
   const [ledgerResult, setLedgerResult] = useState(null);
   const [recalcing, setRecalcing] = useState(false);
   const [recalcResult, setRecalcResult] = useState(null);
+  const [removingDups, setRemovingDups] = useState(false);
+  const [dupResult, setDupResult] = useState(null);
 
   const fixLedger = async () => {
     setFixingLedger(true);
@@ -5238,10 +5240,13 @@ function DataRepairTools({ addToast }) {
         <Btn small variant="ghost" onClick={recalcBalances} disabled={recalcing}>
           {recalcing ? "Recalculating..." : "Recalculate Inventory Balances"}
         </Btn>
+        <Btn small variant="ghost" onClick={async()=>{setRemovingDups(true);try{const r=await API.post("removeDuplicateItems",{});setDupResult(r);if(addToast)addToast("Deactivated "+r.deactivated+" duplicates","success")}catch(e){if(addToast)addToast(e.message,"error")}setRemovingDups(false)}} disabled={removingDups}>
+          {removingDups ? "Removing..." : "Remove Duplicate Items"}
+        </Btn>
       </div>
       {ledgerResult && (
-        <div style={{marginTop:8,fontSize:11,color:T.textMut}}>
-          Ledger: {ledgerResult.rowsFixed || 0} misaligned rows detected. {ledgerResult.note || ""}
+        <div style={{marginTop:8,fontSize:11,color:ledgerResult.fixed>0?T.success:T.textMut}}>
+          Ledger: {ledgerResult.detected || 0} misaligned rows detected, {ledgerResult.fixed || 0} fixed. {ledgerResult.error || ""}
         </div>
       )}
       {recalcResult && recalcResult.results && (
@@ -5264,6 +5269,11 @@ function DataRepairTools({ addToast }) {
             })}</tbody>
           </table>
           <div style={{fontSize:10,color:T.textMut,marginTop:4}}>{recalcResult.itemsProcessed} items processed</div>
+        </div>
+      )}
+      {dupResult && (
+        <div style={{marginTop:8,fontSize:11,color:dupResult.deactivated>0?T.warning:T.textMut}}>
+          Duplicates: {dupResult.deactivated} items deactivated
         </div>
       )}
     </div>
@@ -6117,7 +6127,6 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                   if (!src) return null;
                   const srcQ = normalizeQuestions(src.questions);
                   const mapping = q.autoFillMapping;
-                  const hasMapping = mapping && mapping.sourceFieldIdx !== "" && mapping.sourceFieldIdx !== undefined;
                   return <div style={{ marginTop: 4 }}>
                     {!mapping ? (
                       <button onClick={() => updateQ(i, { autoFillMapping: { sourceFieldIdx: "", readOnly: true } })}
@@ -6126,7 +6135,8 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                       </button>
                     ) : (
                       <div style={{ background: T.bg, borderRadius: T.radSm, padding: 8, border: `1px solid ${T.infoBorder}`, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 11, color: T.textMut, flexShrink: 0 }}>Pull value from:</span>
+                        <span style={{ fontSize: 11, color: T.text, fontWeight: 500, flexShrink: 0 }}>{q.text || "This field"}</span>
+                        <span style={{ fontSize: 10, color: T.textMut }}>pulls from:</span>
                         <select value={mapping.sourceFieldIdx ?? ""} onChange={e => updateQ(i, { autoFillMapping: { ...mapping, sourceFieldIdx: e.target.value } })}
                           style={{ flex: 1, minWidth: 120, padding: "4px 8px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
                           <option value="">— Select source field —</option>

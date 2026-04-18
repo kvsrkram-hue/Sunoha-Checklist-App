@@ -883,6 +883,9 @@ function doPost(e) {
       case "recalculateInventoryBalances":
         var eRIB = requireAdmin(user); if (eRIB) return jsonResponse(eRIB);
         return jsonResponse(recalculateAllInventoryBalances());
+      case "removeDuplicateItems":
+        var eRDI = requireAdmin(user); if (eRDI) return jsonResponse(eRDI);
+        return jsonResponse(removeDuplicateInventoryItems());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -3875,79 +3878,42 @@ function checkAbbreviationUniqueness(abbreviation, category, excludeItemId) {
 // the "question_index" column contains a date, then shifts values to correct positions.
 function fixLedgerColumnMisalignment() {
   var sheet = getSheet(SHEETS.INVENTORY_LEDGER);
-  if (!sheet || sheet.getLastRow() < 2) return { rowsFixed: 0 };
-  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-  var catCol = headers.indexOf("category");
-  var dateCol = headers.indexOf("date");
-  var qiCol = headers.indexOf("question_index");
-  if (catCol < 0 || dateCol < 0) return { rowsFixed: 0, error: "Missing category or date column" };
+  if (!sheet || sheet.getLastRow() < 2) return { detected: 0, fixed: 0 };
+  var sheetHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  var codeHeaders = HEADERS.InventoryLedger;
+  var dateCol = sheetHeaders.indexOf("date");
+  if (dateCol < 0) return { detected: 0, fixed: 0, error: "No date column" };
 
   var categories = ["Green Beans", "Roasted Beans", "Packing Items", "Others"];
-  var data = sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues();
-  var fixed = 0;
+  var numRows = sheet.getLastRow() - 1;
+  var data = sheet.getRange(2, 1, numRows, sheetHeaders.length).getValues();
+  var detected = 0, fixed = 0;
 
+  // Misaligned rows were written using HEADERS index order (codeHeaders) but the sheet
+  // has columns in a different physical order (sheetHeaders). To fix: interpret the row
+  // as if it was written in codeHeaders order, then remap to sheetHeaders order.
   for (var r = 0; r < data.length; r++) {
     var dateVal = String(data[r][dateCol] || "").trim();
-    // Detect misalignment: "date" column has a category name
-    if (categories.indexOf(dateVal) >= 0) {
-      // This row is misaligned — category landed in date column
-      // Correct layout: shift everything right by 1 starting from dateCol
-      // The category value in dateCol should go to catCol
-      var correctCategory = dateVal;
-      // Read the actual date from wherever it ended up (typically shifted right)
-      // In the misaligned layout: col positions after date are all shifted by 1
-      // So the real date is in the column AFTER where date should be (typeCol)
-      var typeCol = headers.indexOf("type");
-      var qtyCol = headers.indexOf("quantity");
-      var balCol = headers.indexOf("balance_after");
-      var refTypeCol = headers.indexOf("reference_type");
-      var refIdCol = headers.indexOf("reference_id");
-      var notesCol = headers.indexOf("notes");
-      var doneByCol = headers.indexOf("done_by");
-      var createdCol = headers.indexOf("created_at");
+    if (categories.indexOf(dateVal) < 0) continue;
+    detected++;
 
-      // In misaligned rows: data was written without category column, so all fields
-      // after item_name are shifted left by 1 relative to the header.
-      // Header: id|item_id|item_name|category|date|type|quantity|...
-      // Data:   id|item_id|item_name|DATE    |TYPE|QTY |BAL_AFT |...
-      // So: header[catCol] has the real date, header[dateCol] has the real type, etc.
-
-      // Read the misaligned values
-      var realDate = String(data[r][catCol] || "").trim();  // category position has the actual date
-      var realType = String(data[r][dateCol] || "").trim(); // date position has category (already detected)
-      // Wait — if dateVal is a category, then the data shifted pattern is:
-      // The "category" column was inserted AFTER item_name in HEADERS but the data row was written
-      // with the OLD header order (no category column). So:
-      // Data positions: id|item_id|item_name|[OLD date]|[OLD type]|[OLD qty]|...
-      // Header positions: id|item_id|item_name|category|date|type|qty|...
-      // So data[catCol] = OLD date, data[dateCol] = OLD type, etc.
-      // But the user says dateVal (data[dateCol]) is a CATEGORY name. That means:
-      // data[dateCol] = "Green Beans" → this is the category that was written by new code
-      // But the NEW code writes category at catCol...
-
-      // Actually: the issue is that appendToSheet uses HEADERS order to build the row.
-      // HEADERS has category at position 3. So NEW writes put category at column 4 (1-indexed).
-      // But the SHEET's column 4 header might be "date" if the physical column order differs.
-      // ensureSheetHasAllColumns appends missing columns at the END. So the physical header is:
-      // id|item_id|item_name|date|type|quantity|...|category|classification_id
-      // But HEADERS declares: id|item_id|item_name|category|date|type|quantity|...
-      // appendToSheet maps by HEADERS order, so it writes: [id, item_id, item_name, CATEGORY, date, type, qty, ...]
-      // But the sheet column 4 is "date", so CATEGORY goes into the "date" column!
-
-      // That IS the root cause. appendToSheet writes by HEADERS index, but the sheet has columns
-      // in a different physical order than HEADERS declares. The fix needs to make appendToSheet
-      // write by column header name, not by position.
-
-      // For now: this row has data in HEADERS order but the sheet has columns in different order.
-      // We need to remap: read by HEADERS index, write by sheet column header.
-      // Actually the simplest fix: just read the row as-is and don't try to fix individual rows.
-      // Instead, fix appendToSheet to write by column name lookup.
-
-      fixed++; // Count but don't try to shift — we'll fix the write path instead
+    // This row's data is in codeHeaders order. Read it as an object using codeHeaders.
+    var obj = {};
+    for (var c = 0; c < codeHeaders.length && c < data[r].length; c++) {
+      obj[codeHeaders[c]] = data[r][c];
     }
+    // Now write it back using sheetHeaders order so each value lands in the right physical column.
+    var fixedRow = sheetHeaders.map(function(h) { return obj[h] !== undefined ? obj[h] : ""; });
+    data[r] = fixedRow;
+    fixed++;
   }
 
-  return { rowsFixed: fixed, note: "Detected " + fixed + " misaligned rows. Fix requires appendToSheet to write by column header name." };
+  if (fixed > 0) {
+    sheet.getRange(2, 1, numRows, sheetHeaders.length).setValues(data);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+  }
+
+  return { detected: detected, fixed: fixed };
 }
 
 // Recalculate inventory balance for a single item from its ledger history.
@@ -4026,6 +3992,40 @@ function appendToSheetByHeader(sheetName, obj) {
   }
   sheet.appendRow(row);
   invalidateCache(sheetName);
+}
+
+// Deactivate duplicate inventory items (same name + same category, keep the one with highest stock or most recent)
+function removeDuplicateInventoryItems() {
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var groups = {};
+  for (var i = 0; i < items.length; i++) {
+    var key = String(items[i].name).trim() + "|" + String(items[i].category).trim();
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(items[i]);
+  }
+  var deactivated = 0;
+  for (var k in groups) {
+    if (groups[k].length <= 1) continue;
+    // Sort: highest current_stock first, then most recent created_at
+    groups[k].sort(function(a, b) {
+      var sa = parseFloat(a.current_stock) || 0, sb = parseFloat(b.current_stock) || 0;
+      if (sb !== sa) return sb - sa;
+      return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    });
+    // Keep first (highest stock), deactivate rest
+    for (var d = 1; d < groups[k].length; d++) {
+      var dup = groups[k][d];
+      if (dup.is_active === "false") continue; // already inactive
+      var idx = findRowIndex(SHEETS.INVENTORY_ITEMS, dup.id);
+      if (idx > 0) {
+        dup.is_active = "false";
+        updateSheetRow(SHEETS.INVENTORY_ITEMS, idx, dup);
+        deactivated++;
+      }
+    }
+  }
+  if (deactivated > 0) invalidateCache(SHEETS.INVENTORY_ITEMS);
+  return { deactivated: deactivated };
 }
 
 // ─── Automated Test Suite ────────────────────────────────────
@@ -4138,14 +4138,21 @@ function handleRunTests(user) {
   results.push({ testNumber: 0, testName: "Environment Check", status: "INFO", checks: envChecks });
 
   // ── TEST 1: Inventory Items ──
+  // Helper: create or reuse existing test item (prevents duplicate abbreviation errors)
+  function getOrCreateTestItem(name, abbr, category) {
+    invalidateCache(SHEETS.INVENTORY_ITEMS);
+    var existing = getRows(SHEETS.INVENTORY_ITEMS).find(function(r) { return String(r.abbreviation || "").toUpperCase() === abbr.toUpperCase(); });
+    if (existing) { testIds.items.push(existing.id); return { id: existing.id, category: existing.category, name: existing.name }; }
+    var created = handleCreateInventoryItem({ name: name, abbreviation: abbr, category: category, unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
+    if (created.error) { diag("Item creation error for " + name + ": " + created.error); return created; }
+    testIds.items.push(created.id);
+    return created;
+  }
   var t1Checks = [];
   try {
-    var gbItem = handleCreateInventoryItem({ name: "TEST_GB_ITEM", abbreviation: "TGBI", category: "Green Beans", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
-    testIds.items.push(gbItem.id);
-    var rbItem = handleCreateInventoryItem({ name: "TEST_RB_ITEM", abbreviation: "TRBI", category: "Roasted Beans", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
-    testIds.items.push(rbItem.id);
-    var pkItem = handleCreateInventoryItem({ name: "TEST_PK_ITEM", abbreviation: "TPKI", category: "Packing Items", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
-    testIds.items.push(pkItem.id);
+    var gbItem = getOrCreateTestItem("TEST_GB_ITEM", "TGBI", "Green Beans");
+    var rbItem = getOrCreateTestItem("TEST_RB_ITEM", "TRBI", "Roasted Beans");
+    var pkItem = getOrCreateTestItem("TEST_PK_ITEM", "TPKI", "Packing Items");
     handleUpdateInventoryItem({ id: gbItem.id, equivalentItems: [{ category: "Roasted Beans", itemId: rbItem.id }, { category: "Packing Items", itemId: pkItem.id }] }, testUser);
     handleUpdateInventoryItem({ id: rbItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }, { category: "Packing Items", itemId: pkItem.id }] }, testUser);
     handleUpdateInventoryItem({ id: pkItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }, { category: "Roasted Beans", itemId: rbItem.id }] }, testUser);
