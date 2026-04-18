@@ -337,4 +337,34 @@ Run through this after every deployment before sharing with team:
 
 ---
 
+---
+
+## GUARD RAIL 15 — RECONCILIATION FORMULA
+
+```
+Total In = Untagged Remaining + Tagged + Delivered + Loss
+```
+
+This must hold for every active inventory item at all times. Any item not balancing shows as DISCREPANCY in the reconciliation report.
+
+---
+
+## GUARD RAIL 16 — ADJUSTMENTS
+
+- ADD adjustment → creates new `ADJ-` untagged entry + IN ledger entry
+- REDUCE adjustment → reduces specific batch via QuantityAllocation + OUT ledger on item + IN ledger on Loss item
+- Both types must maintain Guard Rail 15 formula
+
+---
+
+## GUARD RAIL 17 — MANDATORY FIELDS
+
+- Every question has `required=true` by default
+- Submit handlers must validate required fields before saving
+- Return explicit error listing missing field names
+- Never save incomplete required fields silently
+- Skip validation for: formula fields, readOnly auto-fill fields, optional fields
+
+---
+
 *Last updated: April 2026 | Update this file whenever a new rule is established*

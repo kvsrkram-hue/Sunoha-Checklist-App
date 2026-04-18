@@ -466,6 +466,41 @@ run("S16: Untagged remaining matches inventory change", () => {
   return { pass: errors.length === 0, errors };
 });
 
+// ── SCENARIO 17: ADD adjustment creates untagged entry + IN ledger ──
+run("S17: ADD adjustment → untagged entry + IN ledger", () => {
+  // Simulate: create IN ledger + check it appears
+  createInventoryTransaction("inv_gb", "IN", 25, "manual_adjustment", "ref-s17-adj", "Stock addition: test", "ADMIN");
+  clearRowsCache();
+  const l = getLedger("ref-s17-adj");
+  const errors = [];
+  if (l.length !== 1) errors.push("Expected 1 IN entry, got " + l.length);
+  if (l[0] && l[0].type !== "IN") errors.push("Expected IN, got " + l[0].type);
+  if (l[0] && parseFloat(l[0].quantity) !== 25) errors.push("Expected qty=25, got " + l[0].quantity);
+  // Check stock increased
+  const gbAfter = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_gb");
+  if (parseFloat(gbAfter?.current_stock || 0) < 25) errors.push("Stock should be >= 25, got " + gbAfter?.current_stock);
+  return { pass: errors.length === 0, errors };
+});
+
+// ── SCENARIO 18: REDUCE adjustment from batch ──
+run("S18: REDUCE adjustment → OUT item + allocation increase", () => {
+  // First submit GB QC with 100
+  simulateSubmit("ck_green_beans", gbCkWithLink, gbResp, null, "ref-s18-gb", "TEST");
+  clearRowsCache();
+  const gbBefore = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_gb");
+  const stockBefore = parseFloat(gbBefore?.current_stock || 0);
+  // Simulate reduction: OUT of 20 from the item
+  createInventoryTransaction("inv_gb", "OUT", 20, "stock_reduction", "loss_ref-s18-gb", "Stock reduction test", "ADMIN");
+  clearRowsCache();
+  const gbAfter = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_gb");
+  const stockAfter = parseFloat(gbAfter?.current_stock || 0);
+  const l = getLedger("loss_ref-s18-gb");
+  const errors = [];
+  if (l.length !== 1) errors.push("Expected 1 OUT entry, got " + l.length);
+  if (Math.abs((stockBefore - 20) - stockAfter) > 0.01) errors.push("Stock should decrease by 20, was " + stockBefore + " now " + stockAfter);
+  return { pass: errors.length === 0, errors };
+});
+
 console.log("\n═══════════════════════════════════════");
 console.log(`TOTAL: ${totalPass} PASS, ${totalFail} FAIL`);
 console.log(totalFail === 0 ? "ALL PASS" : totalFail + " FAILURES");

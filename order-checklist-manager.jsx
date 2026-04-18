@@ -147,6 +147,7 @@ const normalizeQuestions = (questions) => {
     if (!result.text) result.text = "";
     if (!result.type) result.type = "text";
     result.remarksTargetIdx = (result.remarksTargetIdx === null || result.remarksTargetIdx === undefined || result.remarksTargetIdx === "") ? null : Number(result.remarksTargetIdx);
+    if (result.required === undefined) result.required = true;
     return result;
   });
 };
@@ -5928,6 +5929,7 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                 </div>
                 <span style={{ fontSize: 12, color: T.textMut, fontFamily: T.mono, width: 22, flexShrink: 0 }}>{String(i + 1).padStart(2, "0")}</span>
                 <Input value={q.text} onChange={v => updateQ(i, { text: v })} placeholder="Question text..." style={{ flex: 1 }} />
+                <button onClick={() => updateQ(i, { required: !q.required })} style={{ padding: "2px 8px", borderRadius: 10, border: "none", fontSize: 10, fontWeight: 600, cursor: "pointer", background: q.required !== false ? "rgba(240,173,78,0.2)" : T.surfaceHover, color: q.required !== false ? T.warning : T.textMut }}>{q.required !== false ? "Required" : "Optional"}</button>
                 {questions.length > 1 && <button onClick={() => removeQ(i)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, flexShrink: 0 }}><Icon name="trash" size={16} color={T.danger} /></button>}
               </div>
               {/* Type selector */}
@@ -6448,9 +6450,13 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
         {categories.map(c=>(
           <Chip key={c.id} label={c.name} active={activeTab===c.name} onClick={()=>setActiveTab(c.name)}/>
         ))}
+        {isAdmin&&<Chip label="Reconciliation" active={activeTab==="__recon"} onClick={()=>setActiveTab("__recon")}/>}
         {isAdmin&&<Btn variant="ghost" small onClick={()=>{const n=prompt("New category name:");if(n&&n.trim())onCreateCategory(n.trim())}} style={{fontSize:11,whiteSpace:"nowrap"}}>+ Category</Btn>}
       </div>
 
+      {activeTab==="__recon"&&isAdmin&&<ReconciliationTab addToast={addToast}/>}
+
+      {activeTab!=="__recon"&&<>
       {/* ── Add Item Button ── */}
       {isAdmin&&<Btn small onClick={()=>{setShowAdd(!showAdd);setNewItem(p=>({...p,category:activeTab}))}} style={{width:"100%"}}>
         <Icon name="plus" size={16} color={T.bg}/> Add Inventory Item
@@ -6651,6 +6657,128 @@ function InventoryLedgerView({ item, isAdmin, addToast, onAdjust }) {
           })}
         </div>
       }
+      </>}
+    </div>
+  );
+}
+
+// ─── Reconciliation Tab (admin only, inside InventoryView) ──
+
+function ReconciliationTab({ addToast }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+  const [fixing, setFixing] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    API.get("getInventoryReconciliation").then(d => { if (d && !d.error) setData(d); else if (addToast) addToast(d?.error || "Failed", "error"); }).catch(e => { if (addToast) addToast(e.message, "error"); }).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  const exportCSV = () => {
+    if (!data || !data.items) return;
+    const rows = [["Item","Code","Category","Total In","Untagged Rem.","Tagged","Delivered","Loss","Discrepancy","Status"]];
+    data.items.forEach(ri => rows.push([ri.itemName, ri.abbreviation, ri.category, ri.totalIn, ri.untaggedRemaining, ri.tagged, ri.delivered, ri.loss, ri.discrepancy, ri.isBalanced ? "OK" : "DISCREPANCY"]));
+    rows.push([]); rows.push(["SUMMARY","Balanced:",data.balancedItems,"Discrepancies:",data.discrepancyItems,"Total Discrepancy:",data.totalDiscrepancy]);
+    const csv = rows.map(r => r.map(v => typeof v === "string" && v.indexOf(",") >= 0 ? '"' + v + '"' : v).join(",")).join("\n");
+    const d2 = new Date(); const fn = "Sunoha-Reconciliation-" + String(d2.getDate()).padStart(2, "0") + "-" + String(d2.getMonth() + 1).padStart(2, "0") + "-" + d2.getFullYear() + ".csv";
+    const blob = new Blob([csv], { type: "text/csv" }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = fn; a.click(); URL.revokeObjectURL(url);
+  };
+
+  if (loading) return <div style={{textAlign:"center",padding:40}}><p style={{color:T.textMut}}>Loading reconciliation...</p></div>;
+  if (!data) return <div style={{textAlign:"center",padding:40}}><p style={{color:T.danger}}>Failed to load reconciliation data.</p></div>;
+
+  const mainItems = (data.items || []).filter(ri => ri.category !== "Loss");
+  const lossItems = (data.items || []).filter(ri => ri.category === "Loss");
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* Summary cards */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8}}>
+        <div style={{background:T.card,borderRadius:T.radSm,padding:"10px 12px",border:`1px solid ${T.border}`,textAlign:"center"}}>
+          <div style={{fontSize:10,color:T.textMut}}>Total Items</div>
+          <div style={{fontSize:18,fontWeight:700,color:T.text}}>{data.totalItems||0}</div>
+        </div>
+        <div style={{background:T.card,borderRadius:T.radSm,padding:"10px 12px",border:`1px solid ${T.successBorder}`,textAlign:"center"}}>
+          <div style={{fontSize:10,color:T.textMut}}>Balanced</div>
+          <div style={{fontSize:18,fontWeight:700,color:T.success}}>{data.balancedItems||0}</div>
+        </div>
+        <div style={{background:T.card,borderRadius:T.radSm,padding:"10px 12px",border:`1px solid ${(data.discrepancyItems||0)>0?"rgba(232,93,93,0.3)":T.border}`,textAlign:"center"}}>
+          <div style={{fontSize:10,color:T.textMut}}>Discrepancies</div>
+          <div style={{fontSize:18,fontWeight:700,color:(data.discrepancyItems||0)>0?T.danger:T.textSec}}>{data.discrepancyItems||0}</div>
+        </div>
+        <div style={{background:T.card,borderRadius:T.radSm,padding:"10px 12px",border:`1px solid ${(data.totalDiscrepancy||0)>0?"rgba(232,93,93,0.3)":T.border}`,textAlign:"center"}}>
+          <div style={{fontSize:10,color:T.textMut}}>Total Disc.</div>
+          <div style={{fontSize:18,fontWeight:700,color:(data.totalDiscrepancy||0)>0?T.danger:T.textSec}}>{data.totalDiscrepancy||0}kg</div>
+        </div>
+      </div>
+      {/* Actions */}
+      <div style={{display:"flex",gap:8}}>
+        <Btn small variant="ghost" onClick={load}>Refresh</Btn>
+        <Btn small variant="ghost" onClick={exportCSV}>Export CSV</Btn>
+      </div>
+      {/* Main table */}
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+          <thead><tr style={{background:T.surfaceHover}}>
+            <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut}}>Item</th>
+            <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut}}>Code</th>
+            <th style={{padding:"6px 8px",textAlign:"left",color:T.textMut}}>Category</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Total In</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Untagged</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Tagged</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Delivered</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Loss</th>
+            <th style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>Disc.</th>
+          </tr></thead>
+          <tbody>
+            {mainItems.map((ri, idx) => {
+              const bad = !ri.isBalanced;
+              const grey = ri.totalIn === 0 && ri.untaggedRemaining === 0;
+              const entries = Array.isArray(ri.untaggedEntries) ? ri.untaggedEntries : [];
+              return <Fragment key={idx}>
+                <tr onClick={() => setExpanded(expanded === idx ? null : idx)} style={{cursor:"pointer",borderBottom:`1px solid ${T.border}`,borderLeft:`3px solid ${bad ? T.danger : grey ? T.textMut : T.success}`,background:bad ? T.dangerBg : "transparent",opacity:grey?0.5:1}}>
+                  <td style={{padding:"6px 8px",color:T.text,fontWeight:500}}>{ri.itemName}</td>
+                  <td style={{padding:"6px 8px",color:T.textMut,fontFamily:T.mono}}>{ri.abbreviation}</td>
+                  <td style={{padding:"6px 8px",color:T.textMut}}>{ri.category}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:T.text}}>{ri.totalIn}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:T.success}}>{ri.untaggedRemaining}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:T.warning}}>{ri.tagged}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:T.info}}>{ri.delivered}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:T.textMut}}>{ri.loss}</td>
+                  <td style={{padding:"6px 8px",textAlign:"right",color:bad?T.danger:T.success,fontWeight:600}}>{bad?(ri.discrepancy>0?"+":"")+ri.discrepancy:"0"}</td>
+                </tr>
+                {expanded === idx && <tr><td colSpan={9} style={{padding:"8px 12px",background:T.bg,borderBottom:`1px solid ${T.border}`}}>
+                  {entries.length > 0 ? (<div>
+                    <span style={{fontSize:10,fontWeight:600,color:T.textSec,display:"block",marginBottom:4}}>Untagged Entries</span>
+                    {entries.map((e, ei) => <div key={ei} style={{fontSize:10,color:T.textMut,padding:"2px 0",display:"flex",gap:12}}>
+                      <span style={{fontFamily:T.mono,color:T.accent,minWidth:120}}>{e.autoId}</span>
+                      <span>Total: {e.total}</span>
+                      <span>Alloc: {e.allocated}</span>
+                      <span style={{color:T.success}}>Rem: {e.remaining}</span>
+                      <span>{e.date}</span>
+                    </div>)}
+                  </div>) : <span style={{fontSize:10,color:T.textMut}}>No untagged entries for this item.</span>}
+                  {bad && <Btn small variant="ghost" onClick={async (ev) => { ev.stopPropagation(); setFixing(true); try { await API.post("fixAllDiscrepancies", {}); if (addToast) addToast("Discrepancies fixed", "success"); load(); } catch (e) { if (addToast) addToast(e.message, "error"); } setFixing(false); }} disabled={fixing} style={{ marginTop: 6 }}>{fixing ? "Fixing..." : "Fix This Item"}</Btn>}
+                </td></tr>}
+              </Fragment>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      {/* Loss tracking section */}
+      {lossItems.length > 0 && (<div style={{marginTop:12}}>
+        <span style={{fontSize:12,fontWeight:600,color:T.textSec,display:"block",marginBottom:6}}>Loss Tracking</span>
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {lossItems.map((li, idx) => (
+            <div key={idx} style={{display:"flex",justifyContent:"space-between",padding:"6px 10px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`,fontSize:11}}>
+              <span style={{color:T.text}}>{li.itemName}</span>
+              <span style={{color:T.warning,fontWeight:600}}>{li.totalIn} kg</span>
+            </div>
+          ))}
+        </div>
+      </div>)}
     </div>
   );
 }

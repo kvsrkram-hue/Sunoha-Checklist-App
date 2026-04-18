@@ -799,6 +799,7 @@ function doGet(e) {
       case "getResponseChain": return jsonResponse(handleGetResponseChain(e.parameter));
       case "response-chain":   return jsonResponse(handleGetResponseChain(e.parameter));
       case "getOrderStageTemplates": return jsonResponse(getOrderStageTemplatesConfig());
+      case "getInventoryReconciliation": var eIRg = requireAdmin(user); if (eIRg) return jsonResponse(eIRg); return jsonResponse(handleGetInventoryReconciliation());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -898,6 +899,15 @@ function doPost(e) {
       case "cleanTestData":
         var eCT = requireAdmin(user); if (eCT) return jsonResponse(eCT);
         return jsonResponse(handleCleanTestContamination());
+      case "addStockAdjustmentAddition":
+        var eASA = requireAdmin(user); if (eASA) return jsonResponse(eASA);
+        return jsonResponse(handleAddStockAdjustmentAddition(body, user));
+      case "addStockAdjustmentReduction":
+        var eASR = requireAdmin(user); if (eASR) return jsonResponse(eASR);
+        return jsonResponse(handleAddStockAdjustmentReduction(body, user));
+      case "getInventoryReconciliation":
+        var eIR = requireAdmin(user); if (eIR) return jsonResponse(eIR);
+        return jsonResponse(handleGetInventoryReconciliation());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -1982,6 +1992,22 @@ function applyRoastBatchInventory(processed, refType, refId, person) {
       var inNotes = "Roast batch " + (i + 1) + ": " + p.outputQty + "kg output" + (p.classificationId ? " [" + lookupClassificationLabel(p.classificationId) + "]" : "");
       if (p.roastedBeanWarning) inNotes = p.roastedBeanWarning + " | " + inNotes;
       createInventoryTransaction(p.roastedBeanItemId, "IN", p.outputQty, refType, refId, inNotes, person, "rb_" + i + "_in", p.classificationId);
+    }
+    // Track roasting loss
+    if (p.lossQty > 0 && p.greenBeanItemId) {
+      var gbItemForLoss = getRows(SHEETS.INVENTORY_ITEMS).find(function(it) { return it.id === p.greenBeanItemId; });
+      if (gbItemForLoss) {
+        var lossItemName = gbItemForLoss.name + " - Roasting Loss";
+        var lossItem = getRows(SHEETS.INVENTORY_ITEMS).find(function(it) { return it.name === lossItemName && it.category === "Loss"; });
+        if (!lossItem) {
+          var lossAbbr = String(gbItemForLoss.abbreviation || "UNKN").substring(0, 4) + "L";
+          var lossId = "inv_loss_" + nextId();
+          appendToSheet(SHEETS.INVENTORY_ITEMS, { id: lossId, category: "Loss", name: lossItemName, unit: "kg", opening_stock: 0, current_stock: 0, min_stock_alert: 0, created_at: new Date().toISOString(), is_active: "true", abbreviation: lossAbbr, equivalent_items: "[]", classification_id: "" });
+          invalidateCache(SHEETS.INVENTORY_ITEMS);
+          lossItem = { id: lossId, name: lossItemName, category: "Loss" };
+        }
+        createInventoryTransaction(lossItem.id, "IN", p.lossQty, refType, refId, "Roasting loss: " + p.sourceAutoId + " — " + p.inputQty + "kg in → " + p.outputQty + "kg out", person, "rb_" + i + "_loss");
+      }
     }
   }
 }
@@ -4337,6 +4363,212 @@ function handleCleanTestContamination() {
   // 6. Recalculate all balances
   recalculateAllInventoryBalances();
   return result;
+}
+
+// ─── Stock Adjustment Handlers ──────────────────────────────
+
+function handleAddStockAdjustmentAddition(body, user) {
+  var itemId = body.itemId;
+  if (!itemId) return { error: "Missing itemId" };
+  var qty = parseFloat(body.quantity);
+  if (isNaN(qty) || qty <= 0) return { error: "Quantity must be positive" };
+  var reason = String(body.reason || "").trim();
+  if (!reason) return { error: "Reason is required" };
+  var date = body.date || new Date().toISOString().split("T")[0];
+  var reference = body.reference || "";
+
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var item = items.find(function(it) { return it.id === itemId; });
+  if (!item) return { error: "Item not found" };
+
+  var autoId = "ADJ-" + formatDateDDMMYY(date) + "-" + (item.abbreviation || "X") + "-" + String(getNextSequenceForPrefix("ADJ")).padStart(3, "0");
+  var utId = "ut_" + nextId();
+  var now = new Date().toISOString();
+
+  // Create untagged entry
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  appendToSheet(SHEETS.UNTAGGED_CHECKLISTS, {
+    id: utId, checklist_id: "manual_adjustment", checklist_name: "Manual Stock Adjustment",
+    person: user.displayName || user.username, date: date, submitted_at: now,
+    tagged_order_id: "", responses: JSON.stringify([
+      { questionIndex: 0, questionText: "Item", response: item.name },
+      { questionIndex: 1, questionText: "Quantity", response: String(qty) },
+      { questionIndex: 2, questionText: "Reason", response: reason },
+      { questionIndex: 3, questionText: "Reference", response: reference },
+    ]),
+    remarks: JSON.stringify({}), submitted_by_user_id: user.id,
+    total_quantity: qty, tagged_quantity: 0, allocations: "[]", auto_id: autoId, is_deleted: "",
+  });
+
+  // Create IN ledger entry
+  createInventoryTransaction(itemId, "IN", qty, "manual_adjustment", utId,
+    "Stock addition: " + reason + (reference ? " [Ref: " + reference + "]" : ""), user.displayName || user.username);
+
+  writeAuditLog(user, "adjustment_add", "InventoryItem", itemId, "+" + qty + "kg " + item.name + " — " + reason);
+  invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+  return { success: true, id: utId, autoId: autoId, quantity: qty };
+}
+
+function handleAddStockAdjustmentReduction(body, user) {
+  var itemId = body.itemId;
+  var batchAutoId = body.batchAutoId;
+  var qty = parseFloat(body.quantity);
+  var reasonCategory = body.reasonCategory || "Other";
+  var reasonDetail = String(body.reasonDetail || "").trim();
+  var date = body.date || new Date().toISOString().split("T")[0];
+
+  if (!itemId) return { error: "Missing itemId" };
+  if (!batchAutoId) return { error: "Missing batch to reduce from" };
+  if (isNaN(qty) || qty <= 0) return { error: "Quantity must be positive" };
+  if (!reasonDetail) return { error: "Reason detail is required" };
+
+  // Check batch remaining
+  var allocated = getAllocatedQuantityForAutoId(batchAutoId);
+  var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var batch = utRows.find(function(r) { return r.auto_id === batchAutoId && !isDeleted(r); });
+  if (!batch) return { error: "Batch not found: " + batchAutoId };
+  var batchTotal = parseFloat(batch.total_quantity) || 0;
+  var remaining = batchTotal - allocated;
+  if (qty > remaining + 0.01) return { error: "Cannot reduce " + qty + "kg — only " + Math.round(remaining * 100) / 100 + "kg remaining in " + batchAutoId };
+
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var item = items.find(function(it) { return it.id === itemId; });
+  if (!item) return { error: "Item not found" };
+
+  // Create allocation to reduce batch remaining
+  createQuantityAllocation(batch.checklist_id, batchAutoId, batchTotal, "loss", "loss_" + reasonCategory, "loss_" + reasonCategory, qty, user.displayName || user.username);
+
+  // OUT from source item
+  var notes = "Stock reduction [" + reasonCategory + "]: " + reasonDetail + " from batch " + batchAutoId;
+  createInventoryTransaction(itemId, "OUT", qty, "stock_reduction", "loss_" + batchAutoId, notes, user.displayName || user.username);
+
+  // IN to loss item
+  var lossItemName = item.name + " - Loss";
+  var lossItem = items.find(function(it) { return it.name === lossItemName && it.category === "Loss"; });
+  if (!lossItem) {
+    var lossId = "inv_loss_" + nextId();
+    var lossAbbr = String(item.abbreviation || "X").substring(0, 4) + "L";
+    appendToSheet(SHEETS.INVENTORY_ITEMS, { id: lossId, category: "Loss", name: lossItemName, unit: "kg", opening_stock: 0, current_stock: 0, min_stock_alert: 0, created_at: new Date().toISOString(), is_active: "true", abbreviation: lossAbbr, equivalent_items: "[]", classification_id: "" });
+    invalidateCache(SHEETS.INVENTORY_ITEMS);
+    lossItem = { id: lossId };
+  }
+  createInventoryTransaction(lossItem.id, "IN", qty, "stock_reduction_loss", "loss_" + batchAutoId, notes, user.displayName || user.username);
+
+  writeAuditLog(user, "adjustment_reduce", "InventoryItem", itemId, "-" + qty + "kg from " + batchAutoId + " [" + reasonCategory + "] " + reasonDetail);
+  invalidateCache(SHEETS.QUANTITY_ALLOCATIONS);
+  return { success: true, batchAutoId: batchAutoId, quantityReduced: qty, newRemaining: remaining - qty };
+}
+
+// ─── Full Reconciliation Report ─────────────────────────────
+
+function handleGetInventoryReconciliation() {
+  ensureSheetHasAllColumns(SHEETS.INVENTORY_ITEMS);
+  ensureSheetHasAllColumns(SHEETS.INVENTORY_LEDGER);
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  var items = getRows(SHEETS.INVENTORY_ITEMS).filter(function(it) { return it.is_active !== "false"; });
+  var ledger = getRows(SHEETS.INVENTORY_LEDGER);
+  var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var reportItems = [];
+  var balanced = 0, discItems = 0, totalDisc = 0;
+
+  // Build item-to-untagged-entries map (same logic as handleGetReconciliationReport)
+  var itemEntries = {};
+  for (var ii = 0; ii < items.length; ii++) itemEntries[items[ii].id] = [];
+  for (var u = 0; u < utRows.length; u++) {
+    var ut = utRows[u];
+    if (isDeleted(ut)) continue;
+    var utTotal = parseFloat(ut.total_quantity) || 0;
+    if (utTotal <= 0) continue;
+    var responses = safeParseJSON(ut.responses, []);
+    var ckId = String(ut.checklist_id || "");
+    var matchedItemId = "";
+    if (ckId === "ck_green_beans" || ckId === "manual_adjustment") {
+      for (var rr = 0; rr < responses.length; rr++) {
+        if (responses[rr].questionText === "Type of Beans" || responses[rr].questionText === "Type of Bean" || responses[rr].questionText === "Item") {
+          var ref = responses[rr].response || "";
+          var found = items.find(function(it) { return it.id === ref || it.name === ref; });
+          if (found) matchedItemId = found.id;
+          break;
+        }
+      }
+    } else if (ckId === "ck_roasted_beans") {
+      var beanRef2 = "";
+      for (var rr2 = 0; rr2 < responses.length; rr2++) {
+        if (responses[rr2].questionText === "Type of Beans" || responses[rr2].questionText === "Type of Bean") { beanRef2 = responses[rr2].response || ""; break; }
+      }
+      if (beanRef2) { var rb = findInventoryItemForCategory(beanRef2, "Roasted Beans"); if (rb.item) matchedItemId = rb.item.id; }
+    } else if (ckId === "ck_grinding") {
+      var roastId2 = "";
+      for (var rr3 = 0; rr3 < responses.length; rr3++) { if (responses[rr3].questionText === "Roast ID") { roastId2 = responses[rr3].response || ""; break; } }
+      if (roastId2) {
+        var rCk = lookupChecklist("ck_roasted_beans");
+        if (rCk) { var rSub = findSubmissionByAutoId(roastId2, rCk); if (rSub && rSub.responses) {
+          for (var gqi = 0; gqi < rCk.questions.length; gqi++) { if (rCk.questions[gqi].text === "Type of Beans" || rCk.questions[gqi].text === "Type of Bean") { var gRef = rSub.responses[gqi] || ""; if (gRef) { var pk = findInventoryItemForCategory(gRef, "Packing Items"); if (pk.item) matchedItemId = pk.item.id; } break; } }
+        }}
+      }
+    }
+    if (matchedItemId && itemEntries[matchedItemId]) {
+      var utAlloc = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
+      itemEntries[matchedItemId].push({ autoId: ut.auto_id || "", total: utTotal, allocated: utAlloc, remaining: Math.max(0, utTotal - utAlloc), date: ut.date || "" });
+    }
+  }
+
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    // totalIn: IN entries excluding reversals, test data, reconciliation adjustments
+    var totalIn = 0;
+    for (var li = 0; li < ledger.length; li++) {
+      var le = ledger[li];
+      if (String(le.item_id) !== String(item.id)) continue;
+      if (le.type !== "IN") continue;
+      if (String(le.notes || "").indexOf("[REVERSAL]") === 0) continue;
+      if (String(le.done_by) === "TEST_RUNNER") continue;
+      var rt = String(le.reference_type || "");
+      if (rt === "reconciliation" || rt === "adjustment") continue;
+      totalIn += parseFloat(le.quantity) || 0;
+    }
+    // untaggedRemaining
+    var utEntries = itemEntries[item.id] || [];
+    var untaggedRem = 0;
+    for (var ue = 0; ue < utEntries.length; ue++) untaggedRem += utEntries[ue].remaining;
+    // tagged
+    var tagged = 0;
+    for (var ue2 = 0; ue2 < utEntries.length; ue2++) tagged += utEntries[ue2].allocated;
+    // delivered
+    var delivered = 0;
+    for (var li2 = 0; li2 < ledger.length; li2++) {
+      if (String(ledger[li2].item_id) !== String(item.id)) continue;
+      if (ledger[li2].type !== "OUT") continue;
+      if (String(ledger[li2].reference_type) !== "order_delivery") continue;
+      if (String(ledger[li2].notes || "").indexOf("[REVERSAL]") === 0) continue;
+      delivered += Math.abs(parseFloat(ledger[li2].quantity) || 0);
+    }
+    // loss
+    var loss = 0;
+    for (var li3 = 0; li3 < ledger.length; li3++) {
+      if (String(ledger[li3].item_id) !== String(item.id)) continue;
+      if (String(ledger[li3].notes || "").indexOf("[REVERSAL]") === 0) continue;
+      var lrt = String(ledger[li3].reference_type || "");
+      if (lrt === "roast_loss" || lrt === "stock_reduction") {
+        loss += Math.abs(parseFloat(ledger[li3].quantity) || 0);
+      }
+    }
+    var disc = Math.round((totalIn - (untaggedRem + tagged + delivered + loss)) * 100) / 100;
+    var isBalanced = Math.abs(disc) <= 0.1;
+    if (isBalanced) balanced++; else discItems++;
+    totalDisc += Math.abs(disc);
+
+    reportItems.push({
+      itemId: item.id, itemName: item.name, category: item.category || "", abbreviation: item.abbreviation || "",
+      totalIn: totalIn, untaggedRemaining: untaggedRem, tagged: tagged, delivered: delivered, loss: loss,
+      discrepancy: disc, isBalanced: isBalanced,
+      untaggedEntries: utEntries,
+    });
+  }
+  return {
+    totalItems: reportItems.length, balancedItems: balanced, discrepancyItems: discItems, totalDiscrepancy: Math.round(totalDisc * 100) / 100,
+    items: reportItems,
+  };
 }
 
 // ─── Automated Test Suite ────────────────────────────────────
