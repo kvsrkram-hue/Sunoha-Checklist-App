@@ -1333,7 +1333,7 @@ export default function App() {
       {isTabView && (
         <nav style={{position:"fixed",bottom:0,left:0,right:0,background:"rgba(15,17,23,0.92)",backdropFilter:"blur(20px)",borderTop:`1px solid ${T.border}`,padding:"8px 0",paddingBottom:"max(8px,env(safe-area-inset-bottom))"}}>
           <div style={{maxWidth:600,margin:"0 auto",display:"flex"}}>
-            {[{id:"orders",icon:"package",label:"Orders"},{id:"responses",icon:"clipboard",label:"Responses"},{id:"inventory",icon:"layers",label:"Inventory"},{id:"blends",icon:"coffee",label:"Blends"},
+            {[{id:"orders",icon:"package",label:"Orders"},...(isAdmin?[{id:"responses",icon:"clipboard",label:"Responses"}]:[]),{id:"inventory",icon:"layers",label:"Inventory"},{id:"blends",icon:"coffee",label:"Blends"},
               ...(isAdmin?[{id:"admin",icon:"settings",label:"Settings"},{id:"users",icon:"users",label:"Users"}]:[])
             ].map(tab=>(
               <button key={tab.id} onClick={()=>switchTab(tab.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3,background:"none",border:"none",cursor:"pointer",padding:"6px 0",color:view===tab.id?T.accent:T.textMut,transition:"color .2s"}}>
@@ -5289,6 +5289,24 @@ function DataRepairTools({ addToast }) {
         <Btn small variant="ghost" onClick={async()=>{setReconLoading(true);setReconReport(null);try{const r=await API.post("getReconciliationReport",{});if(r&&!r.error)setReconReport(r);else if(addToast)addToast(r?.error||"Failed to load report","error")}catch(e){if(addToast)addToast(e.message||"Failed to load report","error")}setReconLoading(false)}} disabled={reconLoading}>
           {reconLoading?"Loading...":"View Reconciliation Report"}
         </Btn>
+        {reconReport&&Array.isArray(reconReport.items)&&<Btn small variant="ghost" onClick={()=>{
+          const rows=[["Item Name","Category","Classification","Inventory ID","Ledger Balance","Untagged Remaining","Discrepancy","Status","Entry Auto ID","Entry Date","Entry Total","Entry Allocated","Entry Remaining","Entry Person"]];
+          (reconReport.items||[]).forEach(ri=>{
+            const el=Array.isArray(ri.entries)?ri.entries:[];
+            if(el.length===0){rows.push([ri.itemName||"",ri.category||"",ri.classification||"",ri.itemId||"",ri.ledgerBalance||0,ri.untaggedRemaining||0,ri.discrepancy||0,ri.status||"","","",0,0,0,""]);}
+            else el.forEach(e=>rows.push([ri.itemName||"",ri.category||"",ri.classification||"",ri.itemId||"",ri.ledgerBalance||0,ri.untaggedRemaining||0,ri.discrepancy||0,ri.status||"",e.autoId||"",e.date||"",e.totalQty||0,e.allocated||0,e.remaining||0,e.person||""]));
+          });
+          rows.push([]);rows.push(["SUMMARY"]);
+          ["Green Beans","Roasted Beans","Packing Items"].forEach(cat=>{
+            const catItems=(reconReport.items||[]).filter(ri=>ri.category===cat);
+            const lSum=catItems.reduce((s,ri)=>s+(ri.ledgerBalance||0),0);
+            const uSum=catItems.reduce((s,ri)=>s+(ri.untaggedRemaining||0),0);
+            rows.push([cat+" Ledger",lSum,cat+" Untagged",uSum,"Discrepancy",Math.round((lSum-uSum)*100)/100]);
+          });
+          const csv=rows.map(r=>r.map(v=>typeof v==="string"&&v.indexOf(",")>=0?'"'+v+'"':v).join(",")).join("\n");
+          const d=new Date();const fn="Sunoha-Reconciliation-"+String(d.getDate()).padStart(2,"0")+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+d.getFullYear()+".csv";
+          const blob=new Blob([csv],{type:"text/csv"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=fn;a.click();URL.revokeObjectURL(url);
+        }}>Download CSV</Btn>}
         <Btn small variant="ghost" onClick={async()=>{setCleaning(true);try{const r=await API.post("cleanTestData",{});if(addToast)addToast("Cleaned: "+r.ledgerDeleted+" ledger, "+r.itemsDeleted+" items, "+r.untaggedDeleted+" untagged, "+r.allocationsDeleted+" allocs","success")}catch(e){if(addToast)addToast(e.message,"error")}setCleaning(false)}} disabled={cleaning}>
           {cleaning?"Cleaning...":"Clean Test Data"}
         </Btn>

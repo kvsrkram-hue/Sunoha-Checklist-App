@@ -856,8 +856,8 @@ function doPost(e) {
       case "tagChecklistToStage": return jsonResponse(handleTagChecklistToStage(body, user));
       case "untagChecklistFromStage": return jsonResponse(handleUntagChecklistFromStage(body, user));
       case "deliverOrder": return jsonResponse(handleDeliverOrder(body, user));
-      case "editUntaggedResponse": return jsonResponse(handleEditUntaggedResponse(body, user));
-      case "softDeleteChecklist": return jsonResponse(handleSoftDeleteChecklist(body, user));
+      case "editUntaggedResponse": var eEU = requireAdmin(user); if (eEU) return jsonResponse(eEU); return jsonResponse(handleEditUntaggedResponse(body, user));
+      case "softDeleteChecklist": var eSD = requireAdmin(user); if (eSD) return jsonResponse(eSD); return jsonResponse(handleSoftDeleteChecklist(body, user));
       case "addClassification":
         var eC1 = requireAdmin(user); if (eC1) return jsonResponse(eC1);
         return jsonResponse(handleAddClassification(body, user));
@@ -4132,28 +4132,85 @@ function handleGetReconciliationReport() {
   ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
   var items = getRows(SHEETS.INVENTORY_ITEMS).filter(function(it) { return it.is_active !== "false"; });
   var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
-  var catMap = { "ck_green_beans": "Green Beans", "ck_roasted_beans": "Roasted Beans", "ck_grinding": "Packing Items" };
   var reportItems = [];
   var totalDisc = 0, discCount = 0;
 
+  // Build a map: itemId → [matching untagged entries]
+  // Each untagged entry is matched to its SPECIFIC item by reading its response data
+  var itemEntries = {};
+  for (var ii = 0; ii < items.length; ii++) itemEntries[items[ii].id] = [];
+
+  for (var u = 0; u < utRows.length; u++) {
+    var ut = utRows[u];
+    if (isDeleted(ut)) continue;
+    var utTotal = parseFloat(ut.total_quantity) || 0;
+    if (utTotal <= 0) continue;
+    var utAlloc = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
+    var rem = Math.max(0, utTotal - utAlloc);
+    var entryObj = { autoId: ut.auto_id || "", totalQty: utTotal, allocated: utAlloc, remaining: rem, date: ut.date || "", person: ut.person || "" };
+
+    // Resolve which specific item this entry belongs to
+    var responses = safeParseJSON(ut.responses, []);
+    var ckId = String(ut.checklist_id || "");
+    var matchedItemId = "";
+
+    if (ckId === "ck_green_beans") {
+      // "Type of Beans" response = inventory item id for the green bean
+      for (var rr = 0; rr < responses.length; rr++) {
+        if (responses[rr].questionText === "Type of Beans" || responses[rr].questionText === "Type of Bean") {
+          matchedItemId = responses[rr].response || ""; break;
+        }
+      }
+    } else if (ckId === "ck_roasted_beans") {
+      // Multi-batch: read beanRef from first batch → resolve to RB equivalent
+      // Single-batch: read "Type of Beans" → resolve to RB equivalent
+      var beanRef = "";
+      for (var rr2 = 0; rr2 < responses.length; rr2++) {
+        if (responses[rr2].questionText === "Type of Beans" || responses[rr2].questionText === "Type of Bean") {
+          beanRef = responses[rr2].response || ""; break;
+        }
+      }
+      if (beanRef) {
+        var rbResolved = findInventoryItemForCategory(beanRef, "Roasted Beans");
+        if (rbResolved.item) matchedItemId = rbResolved.item.id;
+      }
+    } else if (ckId === "ck_grinding") {
+      // Resolve via the Roast ID → RB entry → bean type → Packing Items equivalent
+      var roastId = "";
+      for (var rr3 = 0; rr3 < responses.length; rr3++) {
+        if (responses[rr3].questionText === "Roast ID") { roastId = responses[rr3].response || ""; break; }
+      }
+      if (roastId) {
+        var roastCk = lookupChecklist("ck_roasted_beans");
+        if (roastCk) {
+          var roastSub = findSubmissionByAutoId(roastId, roastCk);
+          if (roastSub && roastSub.responses) {
+            var grBeanRef = "";
+            for (var gqi = 0; gqi < roastCk.questions.length; gqi++) {
+              if (roastCk.questions[gqi].text === "Type of Beans" || roastCk.questions[gqi].text === "Type of Bean") {
+                grBeanRef = roastSub.responses[gqi] || roastSub.responses[String(gqi)] || ""; break;
+              }
+            }
+            if (grBeanRef) {
+              var pkResolved = findInventoryItemForCategory(grBeanRef, "Packing Items");
+              if (pkResolved.item) matchedItemId = pkResolved.item.id;
+            }
+          }
+        }
+      }
+    }
+
+    if (matchedItemId && itemEntries[matchedItemId]) {
+      itemEntries[matchedItemId].push(entryObj);
+    }
+  }
+
+  // Build report per item
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
-    var cat = String(item.category || "");
-    var entries = [];
+    var entries = itemEntries[item.id] || [];
     var utRemaining = 0;
-
-    for (var u = 0; u < utRows.length; u++) {
-      var ut = utRows[u];
-      if (isDeleted(ut)) continue;
-      var utCat = catMap[ut.checklist_id] || "";
-      if (utCat !== cat) continue;
-      var utTotal = parseFloat(ut.total_quantity) || 0;
-      if (utTotal <= 0) continue;
-      var utAlloc = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
-      var rem = Math.max(0, utTotal - utAlloc);
-      utRemaining += rem;
-      entries.push({ autoId: ut.auto_id || "", totalQty: utTotal, allocated: utAlloc, remaining: rem, date: ut.date || "", person: ut.person || "" });
-    }
+    for (var e = 0; e < entries.length; e++) utRemaining += entries[e].remaining;
 
     var ledgerBalance = parseFloat(item.current_stock) || 0;
     var disc = Math.round((ledgerBalance - utRemaining) * 100) / 100;
@@ -4161,7 +4218,7 @@ function handleGetReconciliationReport() {
     totalDisc += Math.abs(disc);
 
     reportItems.push({
-      itemId: item.id, itemName: item.name, category: cat,
+      itemId: item.id, itemName: item.name, category: String(item.category || ""),
       classification: lookupClassificationLabel(item.classification_id),
       ledgerBalance: ledgerBalance, untaggedRemaining: utRemaining,
       discrepancy: disc, status: Math.abs(disc) <= 0.01 ? "OK" : "DISCREPANCY",
