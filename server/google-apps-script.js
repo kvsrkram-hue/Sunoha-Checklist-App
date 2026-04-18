@@ -863,9 +863,11 @@ function doPost(e) {
         return jsonResponse(handleFixRoastedBeansTemplateOrder(body, user));
       case "backfillLedgerCategories":
         var eBf = requireAdmin(user); if (eBf) return jsonResponse(eBf);
-        // Allow manual re-run by clearing the once-per-deploy guard
         _ledgerCategoryBackfillDone = false;
         return jsonResponse(backfillInventoryLedgerCategories());
+      case "runTests":
+        var eTest = requireAdmin(user); if (eTest) return jsonResponse(eTest);
+        return jsonResponse(handleRunTests(user));
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -3813,6 +3815,414 @@ function checkAbbreviationUniqueness(abbreviation, category, excludeItemId) {
     }
   }
   return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ─── Automated Test Suite ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+
+function handleRunTests(user) {
+  var testUser = { id: user.id, username: user.username, displayName: "TEST_RUNNER", role: "admin" };
+  var results = [];
+  var testIds = { items: [], untagged: [], ledger: [], allocations: [], classifications: [], auditStart: new Date().toISOString() };
+
+  function check(desc, actual, expected) {
+    var pass = actual === expected;
+    return { check: desc, result: pass ? "PASS" : "FAIL", detail: pass ? String(actual) : "Expected " + JSON.stringify(expected) + ", got " + JSON.stringify(actual) };
+  }
+  function checkTruthy(desc, val) {
+    return { check: desc, result: val ? "PASS" : "FAIL", detail: String(val || "(falsy)") };
+  }
+  function checkGte(desc, val, min) {
+    var pass = val >= min;
+    return { check: desc, result: pass ? "PASS" : "FAIL", detail: val + (pass ? " >= " : " < ") + min };
+  }
+
+  // ── TEST 1: Inventory Items ──
+  var t1Checks = [];
+  try {
+    var gbItem = handleCreateInventoryItem({ name: "TEST_GB_ITEM", abbreviation: "TGBI", category: "Green Beans", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
+    testIds.items.push(gbItem.id);
+    var rbItem = handleCreateInventoryItem({ name: "TEST_RB_ITEM", abbreviation: "TRBI", category: "Roasted Beans", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
+    testIds.items.push(rbItem.id);
+    handleUpdateInventoryItem({ id: gbItem.id, equivalentItems: [{ category: "Roasted Beans", itemId: rbItem.id }] }, testUser);
+    handleUpdateInventoryItem({ id: rbItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }] }, testUser);
+    invalidateCache(SHEETS.INVENTORY_ITEMS);
+    var items = getRows(SHEETS.INVENTORY_ITEMS);
+    var foundGb = items.find(function(r) { return r.id === gbItem.id; });
+    var foundRb = items.find(function(r) { return r.id === rbItem.id; });
+    t1Checks.push(checkTruthy("Green Bean item created", !!foundGb));
+    t1Checks.push(checkTruthy("Roasted Bean item created", !!foundRb));
+    var gbEq = safeParseJSON(foundGb ? foundGb.equivalent_items : "[]", []);
+    t1Checks.push(check("GB equivalent links to RB", gbEq.length > 0 && gbEq[0].itemId === rbItem.id, true));
+  } catch (e) { t1Checks.push({ check: "Inventory creation", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 1, testName: "Inventory Items", status: t1Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t1Checks });
+
+  // ── TEST 2: Green Bean QC Sample Check ──
+  var t2Checks = [], sampleAutoId = "";
+  try {
+    var sampleCk = lookupChecklist("ck_sample_qc");
+    var sampleNq = sampleCk ? sampleCk.questions : [];
+    var sampleResp = sampleNq.map(function(q, qi) {
+      if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
+      if (q.text === "Sample Quantity") return { questionIndex: qi, questionText: q.text, response: "1" };
+      if (q.text === "Sample Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+      return { questionIndex: qi, questionText: q.text, response: "TEST_VALUE" };
+    });
+    var s2 = handleSubmitUntagged({ checklistId: "ck_sample_qc", date: "2026-01-01", person: "TEST_RUNNER", responses: sampleResp, remarks: {}, orderId: "" }, testUser);
+    testIds.untagged.push(s2.id);
+    sampleAutoId = s2.autoId || "";
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    var utRow = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === s2.id; });
+    t2Checks.push(checkTruthy("Entry created in UntaggedChecklists", !!utRow));
+    t2Checks.push(checkTruthy("Auto ID starts with GBS-", sampleAutoId.indexOf("GBS-") === 0));
+    t2Checks.push(check("total_quantity = 1", parseFloat(utRow ? utRow.total_quantity : 0), 1));
+  } catch (e) { t2Checks.push({ check: "Sample QC submission", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 2, testName: "Green Bean QC Sample Check", status: t2Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t2Checks });
+
+  // ── TEST 3: Green Beans Quality Check ──
+  var t3Checks = [], gbAutoId = "", gbUtId = "";
+  try {
+    var gbCk = lookupChecklist("ck_green_beans");
+    var gbNq = gbCk ? gbCk.questions : [];
+    var gbResp = gbNq.map(function(q, qi) {
+      if (q.text === "Source Sample") return { questionIndex: qi, questionText: q.text, response: sampleAutoId };
+      if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
+      if (q.text === "Quantity received") return { questionIndex: qi, questionText: q.text, response: "100" };
+      if (q.text === "Shipment Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+      return { questionIndex: qi, questionText: q.text, response: "TEST_VALUE" };
+    });
+    var s3 = handleSubmitUntagged({ checklistId: "ck_green_beans", date: "2026-01-02", person: "TEST_RUNNER", responses: gbResp, remarks: {}, orderId: "", batchAllocations: {} }, testUser);
+    gbUtId = s3.id;
+    testIds.untagged.push(s3.id);
+    gbAutoId = s3.autoId || "";
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+    var utRow3 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === s3.id; });
+    t3Checks.push(checkTruthy("Entry created", !!utRow3));
+    t3Checks.push(checkTruthy("Auto ID starts with GB-", gbAutoId.indexOf("GB-") === 0));
+    t3Checks.push(check("total_quantity = 100", parseFloat(utRow3 ? utRow3.total_quantity : 0), 100));
+    var ledger3 = getRows(SHEETS.INVENTORY_LEDGER).filter(function(r) { return String(r.reference_id) === String(s3.id) && r.type === "IN"; });
+    t3Checks.push(checkTruthy("Ledger IN entry exists", ledger3.length > 0));
+    if (ledger3.length > 0) {
+      t3Checks.push(check("Ledger IN qty = 100", parseFloat(ledger3[0].quantity), 100));
+      t3Checks.push(check("Ledger category = Green Beans", String(ledger3[0].category || "").trim(), "Green Beans"));
+    }
+  } catch (e) { t3Checks.push({ check: "GB QC submission", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 3, testName: "Green Beans Quality Check", status: t3Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t3Checks });
+
+  // ── TEST 4: Roasted Beans QC (multi-batch) ──
+  var t4Checks = [], rbAutoId = "", rbUtId = "";
+  try {
+    var rbCk = lookupChecklist("ck_roasted_beans");
+    var rbNq = rbCk ? rbCk.questions : [];
+    var rbResp = rbNq.map(function(q, qi) {
+      if (q.text === "Date of Roast") return { questionIndex: qi, questionText: q.text, response: "2026-01-03" };
+      if (q.text === "Roast profile") return { questionIndex: qi, questionText: q.text, response: "Medium" };
+      if (q.text === "Roast Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+      return { questionIndex: qi, questionText: q.text, response: "" };
+    });
+    var s4 = handleSubmitUntagged({
+      checklistId: "ck_roasted_beans", date: "2026-01-03", person: "TEST_RUNNER",
+      responses: rbResp, remarks: {}, orderId: "",
+      roast_batches: [{ sourceAutoId: gbAutoId, inputQty: 40, outputQty: 35, reasonForLoss: "Moisture loss", classificationId: "" }],
+    }, testUser);
+    rbUtId = s4.id;
+    testIds.untagged.push(s4.id);
+    rbAutoId = s4.autoId || "";
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+    invalidateCache(SHEETS.QUANTITY_ALLOCATIONS);
+    var utRow4 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === s4.id; });
+    t4Checks.push(checkTruthy("Entry created", !!utRow4));
+    t4Checks.push(checkTruthy("Auto ID starts with RB-", rbAutoId.indexOf("RB-") === 0));
+    t4Checks.push(check("total_quantity = 35", parseFloat(utRow4 ? utRow4.total_quantity : 0), 35));
+    // Check roast_batches stored in responses
+    var storedResp = safeParseJSON(utRow4 ? utRow4.responses : "[]", []);
+    var shipField = storedResp.find(function(r) { return r.questionText === "Shipment number used"; });
+    t4Checks.push(checkTruthy("roast_batches JSON in responses", shipField && String(shipField.response || "").indexOf("[") === 0));
+    // Check ledger
+    var ledger4 = getRows(SHEETS.INVENTORY_LEDGER).filter(function(r) { return String(r.reference_id) === String(s4.id); });
+    var outEntries = ledger4.filter(function(r) { return r.type === "OUT"; });
+    var inEntries = ledger4.filter(function(r) { return r.type === "IN"; });
+    t4Checks.push(checkTruthy("Ledger OUT entry (Green Beans)", outEntries.length > 0));
+    t4Checks.push(checkTruthy("Ledger IN entry (Roasted Beans)", inEntries.length > 0));
+    if (outEntries.length > 0) t4Checks.push(check("OUT qty = -40", parseFloat(outEntries[0].quantity), -40));
+    if (inEntries.length > 0) t4Checks.push(check("IN qty = 35", parseFloat(inEntries[0].quantity), 35));
+    // Check GB remaining
+    var gbAllocated = getAllocatedQuantityForAutoId(gbAutoId);
+    t4Checks.push(check("GB allocated = 40", gbAllocated, 40));
+    t4Checks.push(check("GB remaining = 60", 100 - gbAllocated, 60));
+  } catch (e) { t4Checks.push({ check: "RB QC multi-batch", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 4, testName: "Roasted Beans QC (multi-batch)", status: t4Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t4Checks });
+
+  // ── TEST 5: Quantity Validation ──
+  var t5Checks = [], rb2UtId = "";
+  try {
+    var rbResp5 = rbNq.map(function(q, qi) {
+      if (q.text === "Roast Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+      return { questionIndex: qi, questionText: q.text, response: "" };
+    });
+    // Attempt over-allocation (70 > 60 remaining)
+    var s5fail = handleSubmitUntagged({
+      checklistId: "ck_roasted_beans", date: "2026-01-04", person: "TEST_RUNNER",
+      responses: rbResp5, remarks: {}, orderId: "",
+      roast_batches: [{ sourceAutoId: gbAutoId, inputQty: 70, outputQty: 60, reasonForLoss: "test", classificationId: "" }],
+    }, testUser);
+    t5Checks.push(checkTruthy("Over-allocation rejected", !!s5fail.error));
+    // Exact remaining (60)
+    var s5ok = handleSubmitUntagged({
+      checklistId: "ck_roasted_beans", date: "2026-01-04", person: "TEST_RUNNER",
+      responses: rbResp5, remarks: {}, orderId: "",
+      roast_batches: [{ sourceAutoId: gbAutoId, inputQty: 60, outputQty: 55, reasonForLoss: "test", classificationId: "" }],
+    }, testUser);
+    t5Checks.push(checkTruthy("Exact allocation accepted", !!s5ok.id));
+    if (s5ok.id) { rb2UtId = s5ok.id; testIds.untagged.push(s5ok.id); }
+    invalidateCache(SHEETS.QUANTITY_ALLOCATIONS);
+    var gbAlloc5 = getAllocatedQuantityForAutoId(gbAutoId);
+    t5Checks.push(check("GB fully allocated = 100", gbAlloc5, 100));
+  } catch (e) { t5Checks.push({ check: "Quantity validation", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 5, testName: "Quantity Validation", status: t5Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t5Checks });
+
+  // ── TEST 6: Grinding & Packing ──
+  var t6Checks = [], grindUtId = "";
+  try {
+    var grCk = lookupChecklist("ck_grinding");
+    var grNq = grCk ? grCk.questions : [];
+    var grResp = grNq.map(function(q, qi) {
+      if (q.text === "Roast ID") return { questionIndex: qi, questionText: q.text, response: rbAutoId };
+      if (q.text === "Total Net weight") return { questionIndex: qi, questionText: q.text, response: "28" };
+      return { questionIndex: qi, questionText: q.text, response: "TEST_VALUE" };
+    });
+    var s6 = handleSubmitUntagged({
+      checklistId: "ck_grinding", date: "2026-01-05", person: "TEST_RUNNER",
+      responses: grResp, remarks: {}, orderId: "",
+      batchAllocations: { "0": [{ sourceAutoId: rbAutoId, quantity: 30 }] },
+    }, testUser);
+    grindUtId = s6.id;
+    testIds.untagged.push(s6.id);
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+    var utRow6 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === s6.id; });
+    t6Checks.push(checkTruthy("Entry created", !!utRow6));
+    var ledger6 = getRows(SHEETS.INVENTORY_LEDGER).filter(function(r) { return String(r.reference_id) === String(s6.id); });
+    t6Checks.push(checkGte("Ledger entries created", ledger6.length, 1));
+  } catch (e) { t6Checks.push({ check: "Grinding submission", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 6, testName: "Grinding & Packing", status: t6Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t6Checks });
+
+  // ── TEST 7: Soft Delete ──
+  var t7Checks = [];
+  try {
+    var del7 = handleSoftDeleteChecklist({ id: grindUtId, entityType: "untagged", reason: "Automated test cleanup" }, testUser);
+    t7Checks.push(checkTruthy("Delete succeeded", !!del7.success));
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+    var utRow7 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === grindUtId; });
+    t7Checks.push(check("is_deleted = true", isDeleted(utRow7), true));
+    // Check it doesn't appear in approved entries
+    var approved7 = getApprovedEntriesForChecklist("ck_grinding");
+    var found7 = approved7.find(function(e) { return e.autoId === (utRow7 ? utRow7.auto_id : ""); });
+    t7Checks.push(check("Not in approved entries", !!found7, false));
+    // Reversal entries
+    var reversals = getRows(SHEETS.INVENTORY_LEDGER).filter(function(r) { return String(r.reference_id) === String(grindUtId) && String(r.notes || "").indexOf("[REVERSAL]") === 0; });
+    t7Checks.push(checkGte("Reversal ledger entries exist", reversals.length, 1));
+  } catch (e) { t7Checks.push({ check: "Soft delete", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 7, testName: "Soft Delete", status: t7Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t7Checks });
+
+  // ── TEST 8: Edit Validation ──
+  var t8Checks = [];
+  try {
+    // Try reducing GB qty below committed (should fail)
+    var edit8fail = handleEditUntaggedResponse({
+      id: gbUtId, person: "TEST_RUNNER", date: "2026-01-02",
+      responses: gbNq.map(function(q, qi) {
+        if (q.text === "Quantity received") return { questionIndex: qi, questionText: q.text, response: "30" };
+        if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
+        if (q.text === "Shipment Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+        return { questionIndex: qi, questionText: q.text, response: "TEST_VALUE" };
+      }), remarks: {},
+    }, testUser);
+    t8Checks.push(checkTruthy("Reduce below committed rejected", !!edit8fail.error));
+    // Increase to 150 (should succeed)
+    var edit8ok = handleEditUntaggedResponse({
+      id: gbUtId, person: "TEST_RUNNER", date: "2026-01-02",
+      responses: gbNq.map(function(q, qi) {
+        if (q.text === "Quantity received") return { questionIndex: qi, questionText: q.text, response: "150" };
+        if (q.text === "Type of Beans") return { questionIndex: qi, questionText: q.text, response: gbItem.id };
+        if (q.text === "Shipment Approved?") return { questionIndex: qi, questionText: q.text, response: "Yes" };
+        return { questionIndex: qi, questionText: q.text, response: "TEST_VALUE" };
+      }), remarks: {},
+    }, testUser);
+    t8Checks.push(checkTruthy("Increase succeeded", !!edit8ok.success));
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    var utRow8 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === gbUtId; });
+    t8Checks.push(check("total_quantity updated to 150", parseFloat(utRow8 ? utRow8.total_quantity : 0), 150));
+  } catch (e) { t8Checks.push({ check: "Edit validation", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 8, testName: "Edit Validation", status: t8Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t8Checks });
+
+  // ── TEST 9: Dropdown Remaining Quantity ──
+  var t9Checks = [];
+  try {
+    var linked9 = handleGetLinkedEntries({ checklist_id: "ck_roasted_beans" });
+    var gbEntry9 = Array.isArray(linked9) ? linked9.find(function(e) { return e.autoId === gbAutoId; }) : null;
+    t9Checks.push(checkTruthy("GB entry found in linked entries", !!gbEntry9));
+    if (gbEntry9) {
+      t9Checks.push(check("totalQuantity = 150", gbEntry9.totalQuantity, 150));
+      t9Checks.push(check("remainingQuantity = 50", gbEntry9.remainingQuantity, 50));
+    }
+  } catch (e) { t9Checks.push({ check: "Dropdown quantity", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 9, testName: "Dropdown Remaining Quantity", status: t9Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t9Checks });
+
+  // ── TEST 10: Audit Log ──
+  var t10Checks = [];
+  try {
+    var auditRows = getRows(SHEETS.AUDIT_LOG).filter(function(r) { return String(r.timestamp) >= testIds.auditStart && String(r.user_name) === "TEST_RUNNER"; });
+    var hasTag = auditRows.some(function(r) { return r.action === "tag"; });
+    var hasDelete = auditRows.some(function(r) { return r.action === "delete"; });
+    var hasEdit = auditRows.some(function(r) { return r.action === "edit"; });
+    t10Checks.push(checkTruthy("Audit log has tag entries", hasTag));
+    t10Checks.push(checkTruthy("Audit log has delete entries", hasDelete));
+    t10Checks.push(checkTruthy("Audit log has edit entries", hasEdit));
+    t10Checks.push(checkGte("Total audit entries from test run", auditRows.length, 3));
+  } catch (e) { t10Checks.push({ check: "Audit log", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 10, testName: "Audit Log", status: t10Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t10Checks });
+
+  // ── TEST 11: Classifications ──
+  var t11Checks = [], testClassId = "";
+  try {
+    var cls = handleAddClassification({ name: "TEST_CLASS", type: "roast_degree", description: "Test classification" }, testUser);
+    testClassId = cls.id || "";
+    testIds.classifications.push(testClassId);
+    invalidateCache(SHEETS.ROAST_CLASSIFICATIONS);
+    var allCls = handleGetClassifications();
+    var found11 = (allCls.roast_degree || []).find(function(c) { return c.id === testClassId; });
+    t11Checks.push(checkTruthy("Classification created", !!found11));
+    handleDeactivateClassification({ id: testClassId }, testUser);
+    invalidateCache(SHEETS.ROAST_CLASSIFICATIONS);
+    var allCls2 = handleGetClassifications();
+    var found11b = (allCls2.roast_degree || []).find(function(c) { return c.id === testClassId; });
+    t11Checks.push(check("Not in active after deactivation", !!found11b, false));
+  } catch (e) { t11Checks.push({ check: "Classifications", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 11, testName: "Classifications", status: t11Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t11Checks });
+
+  // ── TEST 12: is_deleted filtering ──
+  var t12Checks = [];
+  try {
+    var utRow12 = getRows(SHEETS.UNTAGGED_CHECKLISTS).find(function(r) { return r.id === grindUtId; });
+    var grindAutoId = utRow12 ? String(utRow12.auto_id) : "";
+    if (grindAutoId) {
+      var sub12 = getSubmissionByAutoId(grindAutoId, lookupChecklist("ck_grinding"));
+      t12Checks.push(check("Deleted not in getSubmissionByAutoId", sub12, null));
+    } else {
+      t12Checks.push({ check: "getSubmissionByAutoId", result: "FAIL", detail: "No auto_id found for grinding entry" });
+    }
+    var linked12 = handleGetLinkedEntries({ checklist_id: "ck_grinding" });
+    var grindInLinked = Array.isArray(linked12) ? linked12.find(function(e) { return e.autoId === grindAutoId; }) : null;
+    t12Checks.push(check("Deleted not in getLinkedEntries", !!grindInLinked, false));
+  } catch (e) { t12Checks.push({ check: "is_deleted filtering", result: "FAIL", detail: e.message }); }
+  results.push({ testNumber: 12, testName: "is_deleted Filtering", status: t12Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t12Checks });
+
+  // ── CLEANUP ──
+  var cleanupDeleted = 0;
+  var sheetsAffected = [];
+  try {
+    // Delete test untagged entries
+    var utSheet = getSheet(SHEETS.UNTAGGED_CHECKLISTS);
+    if (utSheet) {
+      var utData = utSheet.getDataRange().getValues();
+      for (var u = utData.length - 1; u >= 1; u--) {
+        var utPerson = String(utData[u][3] || "");
+        if (utPerson === "TEST_RUNNER") { utSheet.deleteRow(u + 1); cleanupDeleted++; }
+      }
+      if (cleanupDeleted > 0) sheetsAffected.push("UntaggedChecklists");
+    }
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
+    // Delete test ledger entries
+    var ledSheet = getSheet(SHEETS.INVENTORY_LEDGER);
+    if (ledSheet) {
+      var ledData = ledSheet.getDataRange().getValues();
+      var ledHeaders = ledData[0].map(String);
+      var refCol = ledHeaders.indexOf("reference_id");
+      var doneByCol = ledHeaders.indexOf("done_by");
+      var ledDel = 0;
+      for (var l = ledData.length - 1; l >= 1; l--) {
+        if (String(ledData[l][doneByCol] || "") === "TEST_RUNNER") { ledSheet.deleteRow(l + 1); ledDel++; }
+      }
+      cleanupDeleted += ledDel;
+      if (ledDel > 0) sheetsAffected.push("InventoryLedger");
+    }
+    invalidateCache(SHEETS.INVENTORY_LEDGER);
+    // Delete test inventory items
+    var invSheet = getSheet(SHEETS.INVENTORY_ITEMS);
+    if (invSheet) {
+      var invData = invSheet.getDataRange().getValues();
+      var invDel = 0;
+      for (var iv = invData.length - 1; iv >= 1; iv--) {
+        if (String(invData[iv][2] || "").indexOf("TEST_") === 0) { invSheet.deleteRow(iv + 1); invDel++; }
+      }
+      cleanupDeleted += invDel;
+      if (invDel > 0) sheetsAffected.push("InventoryItems");
+    }
+    invalidateCache(SHEETS.INVENTORY_ITEMS);
+    // Delete test quantity allocations
+    var qaSheet = getSheet(SHEETS.QUANTITY_ALLOCATIONS);
+    if (qaSheet) {
+      var qaData = qaSheet.getDataRange().getValues();
+      var qaDel = 0;
+      for (var qa = qaData.length - 1; qa >= 1; qa--) {
+        if (String(qaData[qa][8] || "") === "TEST_RUNNER") { qaSheet.deleteRow(qa + 1); qaDel++; }
+      }
+      cleanupDeleted += qaDel;
+      if (qaDel > 0) sheetsAffected.push("QuantityAllocations");
+    }
+    invalidateCache(SHEETS.QUANTITY_ALLOCATIONS);
+    // Delete test audit log entries
+    var auditSheet = getSheet(SHEETS.AUDIT_LOG);
+    if (auditSheet) {
+      var auditData = auditSheet.getDataRange().getValues();
+      var auditDel = 0;
+      for (var a = auditData.length - 1; a >= 1; a--) {
+        if (String(auditData[a][2] || "") === "TEST_RUNNER") { auditSheet.deleteRow(a + 1); auditDel++; }
+      }
+      cleanupDeleted += auditDel;
+      if (auditDel > 0) sheetsAffected.push("AuditLog");
+    }
+    invalidateCache(SHEETS.AUDIT_LOG);
+    // Delete test classifications
+    var clsSheet = getSheet(SHEETS.ROAST_CLASSIFICATIONS);
+    if (clsSheet) {
+      var clsData = clsSheet.getDataRange().getValues();
+      var clsDel = 0;
+      for (var cl = clsData.length - 1; cl >= 1; cl--) {
+        if (String(clsData[cl][1] || "").indexOf("TEST_") === 0) { clsSheet.deleteRow(cl + 1); clsDel++; }
+      }
+      cleanupDeleted += clsDel;
+      if (clsDel > 0) sheetsAffected.push("RoastClassifications");
+    }
+    invalidateCache(SHEETS.ROAST_CLASSIFICATIONS);
+    // Delete test response rows from per-checklist tabs
+    var testCkNames = ["Green Bean QC Sample Check", "Green Beans Quality Check", "Roasted Beans Quality Check", "Grinding & Packing Checklist"];
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    for (var tn = 0; tn < testCkNames.length; tn++) {
+      var rSheet = ss.getSheetByName(testCkNames[tn]);
+      if (rSheet && rSheet.getLastRow() > 2) {
+        var rData = rSheet.getDataRange().getValues();
+        for (var rr = rData.length - 1; rr >= 2; rr--) {
+          if (String(rData[rr][3] || "") === "TEST_RUNNER") { rSheet.deleteRow(rr + 1); cleanupDeleted++; }
+        }
+      }
+    }
+  } catch (e) { Logger.log("Test cleanup error: " + e.message); }
+
+  var passed = results.filter(function(r) { return r.status === "PASS"; }).length;
+  var failed = results.filter(function(r) { return r.status === "FAIL"; }).length;
+  return {
+    totalTests: results.length,
+    passed: passed,
+    failed: failed,
+    results: results,
+    cleanupSummary: { rowsDeleted: cleanupDeleted, sheetsAffected: sheetsAffected },
+  };
 }
 
 // ─── One-time corrective: deduplicate ledger entries and recompute current_stock ──

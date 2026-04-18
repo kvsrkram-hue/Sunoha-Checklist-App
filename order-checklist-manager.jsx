@@ -5200,6 +5200,100 @@ function ClassificationsSection({ addToast }) {
 
 // ─── Admin / Settings View ────────────────────────────────────
 
+// ─── Test Runner Section ─────────────────────────────────────
+
+function TestRunnerSection({ addToast }) {
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+
+  const runTests = async () => {
+    setRunning(true); setResults(null);
+    try {
+      const data = await API.post("runTests", {});
+      if (data?.error) { if (addToast) addToast(data.error, "error"); setRunning(false); return; }
+      setResults(data);
+    } catch (e) { if (addToast) addToast(e.message, "error"); }
+    setRunning(false);
+  };
+
+  const copyReport = () => {
+    if (!results) return;
+    try { navigator.clipboard.writeText(JSON.stringify(results, null, 2)); if (addToast) addToast("Report copied to clipboard", "success"); }
+    catch (e) { if (addToast) addToast("Copy failed", "error"); }
+  };
+
+  return (
+    <div style={{background:T.card,borderRadius:T.rad,padding:16,border:`1px solid ${T.border}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <div>
+          <h3 style={{fontSize:15,fontWeight:600,color:T.text,margin:0}}>System Health Check</h3>
+          <p style={{fontSize:12,color:T.textMut,margin:"4px 0 0"}}>Runs automated end-to-end tests across all features. Creates and deletes test data automatically. Takes ~30 seconds.</p>
+        </div>
+      </div>
+      {!running && !results && (
+        <Btn onClick={runTests} style={{marginTop:8,background:T.accent,color:T.bg,fontWeight:600}}>
+          <span style={{marginRight:6}}>&#9654;</span> Run Tests
+        </Btn>
+      )}
+      {running && (
+        <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8,padding:"12px 14px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
+          <div style={{width:16,height:16,border:`2px solid ${T.accent}`,borderTop:"2px solid transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+          <span style={{fontSize:13,color:T.accent}}>Running tests...</span>
+        </div>
+      )}
+      {results && (
+        <div style={{marginTop:10}}>
+          {/* Summary bar */}
+          <div style={{display:"flex",gap:12,padding:"10px 14px",background:results.failed===0?T.successBg:T.dangerBg,borderRadius:T.radSm,border:`1px solid ${results.failed===0?"rgba(107,203,119,0.25)":"rgba(232,93,93,0.25)"}`,marginBottom:10,alignItems:"center"}}>
+            <span style={{fontSize:14,fontWeight:600,color:results.failed===0?T.success:T.danger}}>
+              {results.failed === 0 ? "All systems operational" : "Issues detected"}
+            </span>
+            <span style={{fontSize:12,color:T.success}}>Passed: {results.passed}</span>
+            {results.failed > 0 && <span style={{fontSize:12,color:T.danger}}>Failed: {results.failed}</span>}
+          </div>
+          {/* Per-test results */}
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {(results.results||[]).map(t => (
+              <div key={t.testNumber} style={{background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`,overflow:"hidden"}}>
+                <button onClick={()=>setExpanded(expanded===t.testNumber?null:t.testNumber)}
+                  style={{width:"100%",padding:"8px 12px",background:"none",border:"none",cursor:"pointer",textAlign:"left",display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:14,color:t.status==="PASS"?T.success:T.danger}}>{t.status==="PASS"?"\u2705":"\u274C"}</span>
+                  <span style={{fontSize:12,fontFamily:T.mono,color:T.textMut,minWidth:24}}>#{t.testNumber}</span>
+                  <span style={{fontSize:13,color:T.text,flex:1}}>{t.testName}</span>
+                  <span style={{fontSize:11,color:t.status==="PASS"?T.success:T.danger,fontWeight:600}}>{t.status}</span>
+                </button>
+                {expanded===t.testNumber && (
+                  <div style={{padding:"6px 12px 10px",borderTop:`1px solid ${T.border}`}}>
+                    {(t.checks||[]).map((c,ci) => (
+                      <div key={ci} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",fontSize:12}}>
+                        <span style={{color:c.result==="PASS"?T.success:T.danger,flexShrink:0}}>{c.result==="PASS"?"\u2713":"\u2717"}</span>
+                        <span style={{color:T.textSec,flex:1}}>{c.check}</span>
+                        <span style={{color:T.textMut,fontFamily:T.mono,fontSize:10,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {/* Cleanup summary */}
+          {results.cleanupSummary && (
+            <div style={{marginTop:8,fontSize:11,color:T.textMut}}>
+              Cleanup: {results.cleanupSummary.rowsDeleted} test rows deleted from {(results.cleanupSummary.sheetsAffected||[]).join(", ")||"no sheets"}
+            </div>
+          )}
+          {/* Actions */}
+          <div style={{display:"flex",gap:8,marginTop:10}}>
+            <Btn small variant="secondary" onClick={runTests}>Run Again</Btn>
+            <Btn small variant="ghost" onClick={copyReport}>Copy Report</Btn>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEditChecklist,onNewChecklist,onEditRules,onDeleteChecklist,onAddOrderType,onDeleteOrderType,onAddCustomer,onDeleteCustomer,onArchive,orderStageTemplates,onSaveOrderStageTemplates}){
   const [newType,setNewType]=useState("");
   const [newCust,setNewCust]=useState("");
@@ -5263,6 +5357,9 @@ function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEdi
 
   return (
     <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:28}}>
+      {/* ── System Health Check (Admin only) ── */}
+      {isAdmin && <TestRunnerSection addToast={addToast}/>}
+
       <div>
         <Section icon="clipboard" count={checklists.length} action={<Btn small onClick={onNewChecklist}><Icon name="plus" size={14} color={T.bg}/> New</Btn>}>Checklist Templates</Section>
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
