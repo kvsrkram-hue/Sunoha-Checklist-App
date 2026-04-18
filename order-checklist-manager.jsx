@@ -6547,6 +6547,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
           ))
         }
       </div>
+      </>}
     </div>
   );
 }
@@ -6657,7 +6658,6 @@ function InventoryLedgerView({ item, isAdmin, addToast, onAdjust }) {
           })}
         </div>
       }
-      </>}
     </div>
   );
 }
