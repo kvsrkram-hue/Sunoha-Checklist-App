@@ -5240,8 +5240,8 @@ function DataRepairTools({ addToast }) {
         <Btn small variant="ghost" onClick={recalcBalances} disabled={recalcing}>
           {recalcing ? "Recalculating..." : "Recalculate Inventory Balances"}
         </Btn>
-        <Btn small variant="ghost" onClick={async()=>{setRemovingDups(true);try{const r=await API.post("removeDuplicateItems",{});setDupResult(r);if(addToast)addToast("Deactivated "+r.deactivated+" duplicates","success")}catch(e){if(addToast)addToast(e.message,"error")}setRemovingDups(false)}} disabled={removingDups}>
-          {removingDups ? "Removing..." : "Remove Duplicate Items"}
+        <Btn small variant="ghost" onClick={async()=>{setRemovingDups(true);try{const r=await API.post("consolidateDuplicateItems",{});setDupResult(r);if(addToast)addToast("Consolidated "+r.duplicatesConsolidated+" duplicates, moved "+r.ledgerEntriesMoved+" ledger entries","success")}catch(e){if(addToast)addToast(e.message,"error")}setRemovingDups(false)}} disabled={removingDups}>
+          {removingDups ? "Consolidating..." : "Consolidate Duplicate Items"}
         </Btn>
       </div>
       {ledgerResult && (
@@ -5256,15 +5256,18 @@ function DataRepairTools({ addToast }) {
               <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Item</th>
               <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Old</th>
               <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>New</th>
-              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Entries</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Untagged Rem.</th>
+              <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Discrep.</th>
             </tr></thead>
             <tbody>{recalcResult.results.map((r, i) => {
               const changed = r.oldBalance !== r.newBalance;
-              return <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:changed?T.warningBg:"transparent"}}>
+              const hasDisc = r.discrepancy && Math.abs(r.discrepancy) > 0.01;
+              return <tr key={i} style={{borderBottom:`1px solid ${T.border}`,background:changed||hasDisc?T.warningBg:"transparent"}}>
                 <td style={{padding:"4px 6px",color:T.text}}>{r.itemName}</td>
                 <td style={{padding:"4px 6px",textAlign:"right",color:changed?T.danger:T.textMut}}>{r.oldBalance}</td>
                 <td style={{padding:"4px 6px",textAlign:"right",color:changed?T.success:T.textMut}}>{r.newBalance}</td>
-                <td style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>{r.entriesProcessed}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>{r.untaggedRemaining!=null?r.untaggedRemaining:"—"}</td>
+                <td style={{padding:"4px 6px",textAlign:"right",color:hasDisc?T.danger:T.textMut}}>{r.discrepancy!=null?r.discrepancy:"—"}</td>
               </tr>;
             })}</tbody>
           </table>
@@ -5272,8 +5275,8 @@ function DataRepairTools({ addToast }) {
         </div>
       )}
       {dupResult && (
-        <div style={{marginTop:8,fontSize:11,color:dupResult.deactivated>0?T.warning:T.textMut}}>
-          Duplicates: {dupResult.deactivated} items deactivated
+        <div style={{marginTop:8,fontSize:11,color:dupResult.duplicatesConsolidated>0?T.warning:T.textMut}}>
+          Consolidated: {dupResult.duplicatesConsolidated||dupResult.deactivated||0} duplicates, {dupResult.ledgerEntriesMoved||0} ledger entries moved
         </div>
       )}
     </div>

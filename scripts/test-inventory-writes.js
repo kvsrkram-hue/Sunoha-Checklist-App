@@ -397,6 +397,75 @@ run("S13: RB multi-batch with 0 qty → 0 entries", () => {
   return { pass: errors.length === 0, errors };
 });
 
+// ── SCENARIO 14: Edit sync — increase qty adds IN entry ──
+run("S14: Edit GB QC qty 100→150 → additional IN entry for +50", () => {
+  // Submit with 100
+  simulateSubmit("ck_green_beans", gbCkWithLink, gbResp, null, "ref-s14", "TEST");
+  clearRowsCache();
+  const before = getRows(SHEETS.INVENTORY_LEDGER).length;
+  // Simulate edit: reverse old, apply new (150)
+  reverseInventoryLedgerForRef("untagged", "ref-s14", "EDITOR");
+  clearRowsCache();
+  const newResp = gbResp.map(r => r.questionText === "Quantity received" ? { ...r, response: "150" } : r);
+  simulateSubmit("ck_green_beans", gbCkWithLink, newResp, null, "ref-s14", "TEST");
+  clearRowsCache();
+  const ledger = getRows(SHEETS.INVENTORY_LEDGER).filter(r => String(r.reference_id) === "ref-s14");
+  const errors = [];
+  // Should have: original IN(100), reversal OUT(100), new IN(150) = 3 entries
+  if (ledger.length < 3) errors.push("Expected at least 3 entries (orig+reversal+new), got " + ledger.length);
+  const inEntries = ledger.filter(r => r.type === "IN" && String(r.notes||"").indexOf("[REVERSAL]") < 0);
+  const lastIn = inEntries[inEntries.length - 1];
+  if (lastIn && parseFloat(lastIn.quantity) !== 150) errors.push("Latest IN should be 150, got " + lastIn?.quantity);
+  return { pass: errors.length === 0, errors };
+});
+
+// ── SCENARIO 15: Negative balance warning ──
+run("S15: Negative balance → warning returned but entry still written", () => {
+  // Set GB stock to 50
+  const itemData = sheetData[SHEETS.INVENTORY_ITEMS];
+  for (let i = 1; i < itemData.length; i++) {
+    if (itemData[i][0] === "inv_gb") itemData[i][5] = 50; // current_stock = 50
+  }
+  clearRowsCache();
+  // OUT 80 from GB (more than 50 available)
+  const result = createInventoryTransaction("inv_gb", "OUT", 80, "test", "ref-s15", "Over-withdrawal test", "TEST");
+  clearRowsCache();
+  const ledger = getRows(SHEETS.INVENTORY_LEDGER).filter(r => String(r.reference_id) === "ref-s15");
+  const errors = [];
+  if (ledger.length !== 1) errors.push("Expected 1 entry despite negative balance, got " + ledger.length);
+  if (ledger[0] && parseFloat(ledger[0].balance_after) >= 0) errors.push("Expected negative balance_after, got " + ledger[0]?.balance_after);
+  // Entry should still be written (not blocked)
+  return { pass: errors.length === 0, errors };
+});
+
+// ── SCENARIO 16: Untagged/inventory sync ──
+run("S16: Untagged remaining matches inventory change", () => {
+  // Submit GB QC with 100kg
+  simulateSubmit("ck_green_beans", gbCkWithLink, gbResp, null, "ref-s16-gb", "TEST");
+  clearRowsCache();
+  // Check GB item stock increased by 100
+  const gbItemAfter = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_gb");
+  const gbStock = parseFloat(gbItemAfter?.current_stock || 0);
+  // Submit RB multi-batch using 40kg from that GB
+  simulateSubmit("ck_roasted_beans", rbCk, [], [{
+    sourceAutoId: "GB-001", inputQty: 40, outputQty: 35,
+    greenBeanItemId: "inv_gb", roastedBeanItemId: "inv_rb"
+  }], "ref-s16-rb", "TEST");
+  clearRowsCache();
+  const gbItemAfter2 = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_gb");
+  const gbStockAfterRoast = parseFloat(gbItemAfter2?.current_stock || 0);
+  const errors = [];
+  // GB stock should have decreased by 40
+  if (Math.abs((gbStock - 40) - gbStockAfterRoast) > 0.01) {
+    errors.push("GB stock mismatch: was " + gbStock + ", after 40kg OUT expected " + (gbStock-40) + ", got " + gbStockAfterRoast);
+  }
+  // RB stock should have increased by 35
+  const rbItemAfter = getRows(SHEETS.INVENTORY_ITEMS).find(r => r.id === "inv_rb");
+  const rbStock = parseFloat(rbItemAfter?.current_stock || 0);
+  if (rbStock < 35) errors.push("RB stock should be at least 35, got " + rbStock);
+  return { pass: errors.length === 0, errors };
+});
+
 console.log("\n═══════════════════════════════════════");
 console.log(`TOTAL: ${totalPass} PASS, ${totalFail} FAIL`);
 console.log(totalFail === 0 ? "ALL PASS" : totalFail + " FAILURES");

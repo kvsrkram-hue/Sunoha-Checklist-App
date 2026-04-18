@@ -886,6 +886,9 @@ function doPost(e) {
       case "removeDuplicateItems":
         var eRDI = requireAdmin(user); if (eRDI) return jsonResponse(eRDI);
         return jsonResponse(removeDuplicateInventoryItems());
+      case "consolidateDuplicateItems":
+        var eCDI = requireAdmin(user); if (eCDI) return jsonResponse(eCDI);
+        return jsonResponse(consolidateDuplicateInventoryItems());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -1921,8 +1924,15 @@ function validateRoastBatches(batches, excludeDestAutoId) {
       return { ok: false, error: "Batch " + (i + 1) + ": cannot use " + inputQty + "kg from " + srcAutoId + " — only " + Math.round(remaining * 100) / 100 + "kg available" };
     }
     pendingBySource[srcAutoId] = pendingHere + inputQty;
-    // Resolve the green bean inventory item from the source submission's "Type of Beans" field
-    var beanRef = srcInfo.responses ? (srcInfo.responses[1] || srcInfo.responses["1"] || "") : "";
+    // Resolve the green bean inventory item from the source submission's "Type of Beans" field (by text, not index)
+    var beanRef = "";
+    if (srcInfo.responses && greenBeanCk.questions) {
+      for (var bqi = 0; bqi < greenBeanCk.questions.length; bqi++) {
+        if (greenBeanCk.questions[bqi].text === "Type of Beans" || greenBeanCk.questions[bqi].text === "Type of Bean") {
+          beanRef = srcInfo.responses[bqi] || srcInfo.responses[String(bqi)] || ""; break;
+        }
+      }
+    }
     var gbItem = findInventoryItemForCategory(beanRef, "Green Beans");
     // Additional check: verify actual inventory stock can cover the withdrawal
     if (gbItem.item) {
@@ -2525,15 +2535,13 @@ function handleGetUntagged() {
   // Consumption = max(tagged_quantity, total allocations in QuantityAllocations).
   return getRows(SHEETS.UNTAGGED_CHECKLISTS).filter(function(r) { return !isDeleted(r); }).map(function(r) {
     var totalQ = parseFloat(r.total_quantity) || 0;
-    var taggedQ = parseFloat(r.tagged_quantity) || 0;
     var allocatedFromQA = r.auto_id ? getAllocatedQuantityForAutoId(r.auto_id) : 0;
-    var effectiveTagged = Math.max(taggedQ, allocatedFromQA);
     return {
       id: r.id, checklistId: r.checklist_id, checklistName: r.checklist_name,
       person: r.person, date: r.date, submittedAt: r.submitted_at,
       taggedOrderId: r.tagged_order_id || "", responses: safeParseJSON(r.responses, []),
       remarks: safeParseJSON(r.remarks, {}), submittedByUserId: r.submitted_by_user_id || "",
-      totalQuantity: totalQ, taggedQuantity: effectiveTagged, remainingQuantity: totalQ - effectiveTagged,
+      totalQuantity: totalQ, taggedQuantity: allocatedFromQA, remainingQuantity: totalQ - allocatedFromQA,
       allocations: safeParseJSON(r.allocations, []),
       autoId: r.auto_id || "",
     };
@@ -2560,9 +2568,7 @@ function handleGetUntaggedResponse(params) {
   if (!r) return { error: "Untagged response not found: " + id };
   if (isDeleted(r)) return { error: "Untagged response has been deleted: " + id };
   var totalQ = parseFloat(r.total_quantity) || 0;
-  var taggedQ = parseFloat(r.tagged_quantity) || 0;
   var allocatedFromQA = r.auto_id ? getAllocatedQuantityForAutoId(r.auto_id) : 0;
-  var effectiveTagged = Math.max(taggedQ, allocatedFromQA);
   return {
     id: r.id, checklistId: r.checklist_id, checklistName: r.checklist_name,
     person: r.person, date: r.date, submittedAt: r.submitted_at,
@@ -2570,7 +2576,7 @@ function handleGetUntaggedResponse(params) {
     responses: safeParseJSON(r.responses, []),
     remarks: safeParseJSON(r.remarks, {}),
     submittedByUserId: r.submitted_by_user_id || "",
-    totalQuantity: totalQ, taggedQuantity: effectiveTagged, remainingQuantity: totalQ - effectiveTagged,
+    totalQuantity: totalQ, taggedQuantity: allocatedFromQA, remainingQuantity: totalQ - allocatedFromQA,
     allocations: safeParseJSON(r.allocations, []),
     autoId: r.auto_id || "",
   };
@@ -3965,7 +3971,7 @@ function recalculateInventoryBalance(itemId) {
   return { itemId: itemId, itemName: item.name, oldBalance: oldBalance, newBalance: balance, entriesProcessed: itemEntries.length };
 }
 
-// Recalculate balances for ALL active inventory items
+// Recalculate balances for ALL active inventory items + reconciliation check
 function recalculateAllInventoryBalances() {
   var items = getRows(SHEETS.INVENTORY_ITEMS);
   var results = [];
@@ -3976,6 +3982,25 @@ function recalculateAllInventoryBalances() {
   }
   invalidateCache(SHEETS.INVENTORY_ITEMS);
   invalidateCache(SHEETS.INVENTORY_LEDGER);
+  // Reconciliation: compare ledger balance vs untagged remaining sum per category
+  try {
+    var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+    var catMap = { "ck_green_beans": "Green Beans", "ck_roasted_beans": "Roasted Beans", "ck_grinding": "Packing Items" };
+    for (var ri = 0; ri < results.length; ri++) {
+      var cat = results[ri].itemName ? String(getRows(SHEETS.INVENTORY_ITEMS).find(function(it) { return it.id === results[ri].itemId; })?.category || "") : "";
+      var utRemaining = 0;
+      for (var u = 0; u < utRows.length; u++) {
+        if (isDeleted(utRows[u])) continue;
+        var utCat = catMap[utRows[u].checklist_id] || "";
+        if (utCat !== cat) continue;
+        var utTotal = parseFloat(utRows[u].total_quantity) || 0;
+        var utAlloc = utRows[u].auto_id ? getAllocatedQuantityForAutoId(utRows[u].auto_id) : 0;
+        utRemaining += Math.max(0, utTotal - utAlloc);
+      }
+      results[ri].untaggedRemaining = utRemaining;
+      results[ri].discrepancy = Math.round((results[ri].newBalance - utRemaining) * 100) / 100;
+    }
+  } catch (e) { Logger.log("Reconciliation error: " + e.message); }
   return { itemsProcessed: results.length, results: results };
 }
 
@@ -4026,6 +4051,68 @@ function removeDuplicateInventoryItems() {
   }
   if (deactivated > 0) invalidateCache(SHEETS.INVENTORY_ITEMS);
   return { deactivated: deactivated };
+}
+
+// Consolidate duplicate items: merge ledger entries from duplicates into the primary item
+function consolidateDuplicateInventoryItems() {
+  ensureSheetHasAllColumns(SHEETS.INVENTORY_ITEMS);
+  ensureSheetHasAllColumns(SHEETS.INVENTORY_LEDGER);
+  var items = getRows(SHEETS.INVENTORY_ITEMS);
+  var groups = {};
+  for (var i = 0; i < items.length; i++) {
+    var key = String(items[i].name).trim().toLowerCase() + "|" + String(items[i].category).trim().toLowerCase();
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(items[i]);
+  }
+  var consolidated = 0, ledgersMoved = 0;
+  var sheet = getSheet(SHEETS.INVENTORY_LEDGER);
+  var ledData = sheet.getDataRange().getValues();
+  var ledHeaders = ledData[0].map(String);
+  var ledItemIdCol = ledHeaders.indexOf("item_id");
+  var ledItemNameCol = ledHeaders.indexOf("item_name");
+
+  for (var k in groups) {
+    if (groups[k].length <= 1) continue;
+    // Count ledger entries per item to find the most active one
+    groups[k].forEach(function(it) {
+      it._ledgerCount = 0;
+      for (var lr = 1; lr < ledData.length; lr++) {
+        if (String(ledData[lr][ledItemIdCol]) === String(it.id)) it._ledgerCount++;
+      }
+    });
+    groups[k].sort(function(a, b) {
+      if (b._ledgerCount !== a._ledgerCount) return b._ledgerCount - a._ledgerCount;
+      return (parseFloat(b.current_stock) || 0) - (parseFloat(a.current_stock) || 0);
+    });
+    var primary = groups[k][0];
+    for (var d = 1; d < groups[k].length; d++) {
+      var dup = groups[k][d];
+      // Move ledger entries from dup to primary
+      for (var lr2 = 1; lr2 < ledData.length; lr2++) {
+        if (String(ledData[lr2][ledItemIdCol]) === String(dup.id)) {
+          ledData[lr2][ledItemIdCol] = primary.id;
+          ledData[lr2][ledItemNameCol] = primary.name;
+          ledgersMoved++;
+        }
+      }
+      // Deactivate duplicate
+      var dupIdx = findRowIndex(SHEETS.INVENTORY_ITEMS, dup.id);
+      if (dupIdx > 0) { dup.is_active = "false"; updateSheetRow(SHEETS.INVENTORY_ITEMS, dupIdx, dup); }
+      consolidated++;
+    }
+  }
+  // Write back ledger changes
+  if (ledgersMoved > 0 && ledData.length > 1) {
+    sheet.getRange(1, 1, ledData.length, ledHeaders.length).setValues(ledData);
+  }
+  invalidateCache(SHEETS.INVENTORY_ITEMS);
+  invalidateCache(SHEETS.INVENTORY_LEDGER);
+  // Recalculate balances for all active items after consolidation
+  if (consolidated > 0) {
+    var activeItems = getRows(SHEETS.INVENTORY_ITEMS).filter(function(it) { return it.is_active !== "false"; });
+    for (var ai = 0; ai < activeItems.length; ai++) recalculateInventoryBalance(activeItems[ai].id);
+  }
+  return { duplicatesConsolidated: consolidated, ledgerEntriesMoved: ledgersMoved };
 }
 
 // ─── Automated Test Suite ────────────────────────────────────
@@ -4359,7 +4446,12 @@ function handleRunTests(user) {
     try {
       var diagRbCk = lookupChecklist("ck_roasted_beans");
       var diagRbSub = diagRbCk ? findSubmissionByAutoId(rbAutoId, diagRbCk) : null;
-      var diagBeanRef = diagRbSub && diagRbSub.responses ? (diagRbSub.responses[2] || diagRbSub.responses["2"] || "") : "";
+      var diagBeanRef = "";
+      if (diagRbSub && diagRbSub.responses && diagRbCk && diagRbCk.questions) {
+        for (var dqi = 0; dqi < diagRbCk.questions.length; dqi++) {
+          if (diagRbCk.questions[dqi].text === "Type of Beans" || diagRbCk.questions[dqi].text === "Type of Bean") { diagBeanRef = diagRbSub.responses[dqi] || ""; break; }
+        }
+      }
       t6Checks.push({ check: "DIAG: RB submission found", result: "INFO", detail: diagRbSub ? "yes, responses keys=" + JSON.stringify(Object.keys(diagRbSub.responses || {})) : "NOT FOUND" });
       t6Checks.push({ check: "DIAG: beanRef from RB[2]", result: "INFO", detail: String(diagBeanRef || "EMPTY") });
       if (diagBeanRef) {
