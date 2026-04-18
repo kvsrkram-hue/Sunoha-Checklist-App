@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import * as XLSX from "xlsx";
 
 // ─── API Helper (Google Apps Script backend) ──────────────────
@@ -5286,51 +5286,55 @@ function DataRepairTools({ addToast }) {
       )}
       {/* Reconciliation + Clean Test Data */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
-        <Btn small variant="ghost" onClick={async()=>{setReconLoading(true);try{const r=await API.post("getReconciliationReport",{});setReconReport(r)}catch(e){if(addToast)addToast(e.message,"error")}setReconLoading(false)}} disabled={reconLoading}>
+        <Btn small variant="ghost" onClick={async()=>{setReconLoading(true);setReconReport(null);try{const r=await API.post("getReconciliationReport",{});if(r&&!r.error)setReconReport(r);else if(addToast)addToast(r?.error||"Failed to load report","error")}catch(e){if(addToast)addToast(e.message||"Failed to load report","error")}setReconLoading(false)}} disabled={reconLoading}>
           {reconLoading?"Loading...":"View Reconciliation Report"}
         </Btn>
         <Btn small variant="ghost" onClick={async()=>{setCleaning(true);try{const r=await API.post("cleanTestData",{});if(addToast)addToast("Cleaned: "+r.ledgerDeleted+" ledger, "+r.itemsDeleted+" items, "+r.untaggedDeleted+" untagged, "+r.allocationsDeleted+" allocs","success")}catch(e){if(addToast)addToast(e.message,"error")}setCleaning(false)}} disabled={cleaning}>
           {cleaning?"Cleaning...":"Clean Test Data"}
         </Btn>
       </div>
-      {reconReport && reconReport.items && (
+      {reconReport && Array.isArray(reconReport.items) && (
         <div style={{marginTop:8}}>
           <div style={{display:"flex",gap:12,marginBottom:6,fontSize:11}}>
             <span style={{color:T.textSec}}>Items: {reconReport.summary?.totalItems||0}</span>
-            <span style={{color:reconReport.summary?.itemsWithDiscrepancy>0?T.danger:T.success}}>Discrepancies: {reconReport.summary?.itemsWithDiscrepancy||0}</span>
+            <span style={{color:(reconReport.summary?.itemsWithDiscrepancy||0)>0?T.danger:T.success}}>Discrepancies: {reconReport.summary?.itemsWithDiscrepancy||0}</span>
           </div>
-          <div style={{maxHeight:250,overflowY:"auto"}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-              <thead><tr style={{background:T.surfaceHover}}>
-                <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Item</th>
-                <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Category</th>
-                <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Ledger</th>
-                <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Untagged</th>
-                <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Disc.</th>
-                <th style={{padding:"4px 6px",textAlign:"center",color:T.textMut}}>Status</th>
-              </tr></thead>
-              <tbody>{reconReport.items.map((ri,idx)=>{
-                const bad=ri.status==="DISCREPANCY";
-                return <React.Fragment key={idx}>
-                  <tr onClick={()=>setReconExpanded(reconExpanded===idx?null:idx)} style={{cursor:"pointer",borderBottom:`1px solid ${T.border}`,background:bad?T.dangerBg:"transparent"}}>
-                    <td style={{padding:"4px 6px",color:T.text}}>{ri.itemName}{ri.classification?<span style={{fontSize:9,color:T.accent,marginLeft:4}}>{ri.classification}</span>:null}</td>
-                    <td style={{padding:"4px 6px",color:T.textMut}}>{ri.category}</td>
-                    <td style={{padding:"4px 6px",textAlign:"right",color:T.text}}>{ri.ledgerBalance}</td>
-                    <td style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>{ri.untaggedRemaining}</td>
-                    <td style={{padding:"4px 6px",textAlign:"right",color:bad?T.danger:T.success}}>{ri.discrepancy}</td>
-                    <td style={{padding:"4px 6px",textAlign:"center"}}><span style={{fontSize:10,color:bad?T.danger:T.success}}>{ri.status}</span></td>
-                  </tr>
-                  {reconExpanded===idx&&ri.entries.length>0&&<tr><td colSpan={6} style={{padding:"4px 12px",background:T.surfaceHover}}>
-                    {ri.entries.map((e,ei)=><div key={ei} style={{fontSize:10,color:T.textMut,padding:"2px 0"}}>
-                      <span style={{fontFamily:T.mono,color:T.accent}}>{e.autoId}</span> total={e.totalQty} alloc={e.allocated} rem={e.remaining} {e.date} {e.person}
-                    </div>)}
-                  </td></tr>}
-                </React.Fragment>;
-              })}</tbody>
-            </table>
-          </div>
-          {reconReport.summary?.itemsWithDiscrepancy>0&&(
-            <Btn small variant="ghost" onClick={async()=>{setFixing(true);try{const r=await API.post("fixAllDiscrepancies",{});if(addToast)addToast("Fixed "+r.itemsFixed+" items, "+r.adjustmentsMade+" adjustments","success");setReconReport(null)}catch(e){if(addToast)addToast(e.message,"error")}setFixing(false)}} disabled={fixing} style={{marginTop:6}}>
+          {reconReport.items.length===0?<p style={{fontSize:11,color:T.textMut}}>No active inventory items found.</p>:(
+            <div style={{maxHeight:250,overflowY:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                <thead><tr style={{background:T.surfaceHover}}>
+                  <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Item</th>
+                  <th style={{padding:"4px 6px",textAlign:"left",color:T.textMut}}>Category</th>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Ledger</th>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Untagged</th>
+                  <th style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>Disc.</th>
+                  <th style={{padding:"4px 6px",textAlign:"center",color:T.textMut}}>Status</th>
+                </tr></thead>
+                <tbody>{reconReport.items.map((ri,idx)=>{
+                  if (!ri) return null;
+                  const bad=ri.status==="DISCREPANCY";
+                  const entryList=Array.isArray(ri.entries)?ri.entries:[];
+                  return <Fragment key={idx}>
+                    <tr onClick={()=>setReconExpanded(reconExpanded===idx?null:idx)} style={{cursor:"pointer",borderBottom:`1px solid ${T.border}`,background:bad?T.dangerBg:"transparent"}}>
+                      <td style={{padding:"4px 6px",color:T.text}}>{ri.itemName||"—"}{ri.classification?<span style={{fontSize:9,color:T.accent,marginLeft:4}}>{ri.classification}</span>:null}</td>
+                      <td style={{padding:"4px 6px",color:T.textMut}}>{ri.category||""}</td>
+                      <td style={{padding:"4px 6px",textAlign:"right",color:T.text}}>{ri.ledgerBalance!=null?ri.ledgerBalance:0}</td>
+                      <td style={{padding:"4px 6px",textAlign:"right",color:T.textMut}}>{ri.untaggedRemaining!=null?ri.untaggedRemaining:0}</td>
+                      <td style={{padding:"4px 6px",textAlign:"right",color:bad?T.danger:T.success}}>{ri.discrepancy!=null?ri.discrepancy:0}</td>
+                      <td style={{padding:"4px 6px",textAlign:"center"}}><span style={{fontSize:10,color:bad?T.danger:T.success}}>{ri.status||"OK"}</span></td>
+                    </tr>
+                    {reconExpanded===idx&&entryList.length>0&&<tr><td colSpan={6} style={{padding:"4px 12px",background:T.surfaceHover}}>
+                      {entryList.map((e,ei)=><div key={ei} style={{fontSize:10,color:T.textMut,padding:"2px 0"}}>
+                        <span style={{fontFamily:T.mono,color:T.accent}}>{e.autoId||"—"}</span> total={e.totalQty||0} alloc={e.allocated||0} rem={e.remaining||0} {e.date||""} {e.person||""}
+                      </div>)}
+                    </td></tr>}
+                  </Fragment>;
+                })}</tbody>
+              </table>
+            </div>
+          )}
+          {(reconReport.summary?.itemsWithDiscrepancy||0)>0&&(
+            <Btn small variant="ghost" onClick={async()=>{setFixing(true);try{const r=await API.post("fixAllDiscrepancies",{});if(addToast)addToast("Fixed "+(r?.itemsFixed||0)+" items, "+(r?.adjustmentsMade||0)+" adjustments","success");setReconReport(null)}catch(e){if(addToast)addToast(e.message,"error")}setFixing(false)}} disabled={fixing} style={{marginTop:6}}>
               {fixing?"Fixing...":"Fix All Discrepancies"}
             </Btn>
           )}
