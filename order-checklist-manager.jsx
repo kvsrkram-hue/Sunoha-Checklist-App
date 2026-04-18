@@ -5510,6 +5510,35 @@ function FormulaBuilder({ fields, onChange, allChecklists, selfQuestions, label 
 
 // ─── Edit Checklist View ──────────────────────────────────────
 
+function AutoFillAddRow({ questions, srcQ, linkedIdx, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [targetIdx, setTargetIdx] = useState("");
+  const [sourceIdx, setSourceIdx] = useState("");
+  const [readOnly, setReadOnly] = useState(true);
+  const unmapped = questions.map((q, qi) => ({ q, qi })).filter(({ q, qi }) => qi !== linkedIdx && !q.autoFillMapping);
+  if (unmapped.length === 0) return null;
+  if (!open) return <button onClick={() => setOpen(true)} style={{ background: "none", border: `1px dashed ${T.border}`, borderRadius: T.radSm, padding: "4px 10px", fontSize: 11, color: T.accent, cursor: "pointer", marginTop: 6 }}>+ Add Mapping</button>;
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", background: T.bg, borderRadius: T.radSm, border: `1px dashed ${T.accentBorder}`, marginTop: 6, flexWrap: "wrap" }}>
+      <select value={targetIdx} onChange={e => setTargetIdx(e.target.value)} style={{ flex: 1, minWidth: 90, padding: "3px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+        <option value="">— Target field —</option>
+        {unmapped.map(({ q, qi }) => <option key={qi} value={qi}>{q.text || `Q${qi + 1}`}</option>)}
+      </select>
+      <span style={{ fontSize: 10, color: T.textMut }}>pulls from:</span>
+      <select value={sourceIdx} onChange={e => setSourceIdx(e.target.value)} style={{ flex: 1, minWidth: 90, padding: "3px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+        <option value="">— Source field —</option>
+        {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
+      </select>
+      <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
+        <input type="checkbox" checked={readOnly} onChange={e => setReadOnly(e.target.checked)} style={{ accentColor: T.accent }} />
+        Read-only
+      </label>
+      <Btn small disabled={targetIdx === "" || sourceIdx === ""} onClick={() => { onAdd(Number(targetIdx), sourceIdx, readOnly); setOpen(false); setTargetIdx(""); setSourceIdx(""); }}>Save</Btn>
+      <Btn small variant="ghost" onClick={() => { setOpen(false); setTargetIdx(""); setSourceIdx(""); }}>Cancel</Btn>
+    </div>
+  );
+}
+
 function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, inventoryCategories }) {
   const [name, setName] = useState(checklist?.name || "");
   const [subtitle, setSubtitle] = useState(checklist?.subtitle || "");
@@ -5875,20 +5904,40 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                           : <Badge variant="danger" style={{ fontSize: 10 }}>{!hasGate && !hasAutoId ? "Source needs both Approval Gate and Auto ID enabled" : !hasGate ? "Source needs Approval Gate configured" : "Source checklist must have Auto ID enabled for linking to work"}</Badge>}
                       </div>;
                     })()}
-                    {/* Auto-fill mappings summary (configured per-question below) */}
+                    {/* Auto-fill mappings — centralized builder */}
                     {q.linkedSource.checklistId && (() => {
                       const src = (allChecklists || []).find(c => c.id === q.linkedSource.checklistId);
                       if (!src) return null;
                       const srcQ = normalizeQuestions(src.questions);
-                      const mapped = questions.map((tq, ti) => {
+                      const existingMappings = questions.map((tq, ti) => {
                         if (ti === i || !tq.autoFillMapping || tq.autoFillMapping.sourceFieldIdx === "" || tq.autoFillMapping.sourceFieldIdx === undefined) return null;
-                        const sf = srcQ[Number(tq.autoFillMapping.sourceFieldIdx)];
-                        return sf ? `${sf.text} → ${tq.text}${tq.autoFillMapping.readOnly !== false ? " (read-only)" : ""}` : null;
+                        return { targetIdx: ti, targetText: tq.text, sourceFieldIdx: tq.autoFillMapping.sourceFieldIdx, readOnly: tq.autoFillMapping.readOnly !== false };
                       }).filter(Boolean);
-                      return mapped.length > 0 ? <div style={{ marginTop: 8, padding: 8, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 4 }}>Active auto-fill mappings:</span>
-                        {mapped.map((txt, mi) => <span key={mi} style={{ fontSize: 11, color: T.accent, display: "block" }}>{txt}</span>)}
-                      </div> : <div style={{ marginTop: 6, fontSize: 11, color: T.textMut }}>Configure auto-fill on each question below using "Auto-fill from {src.name}".</div>;
+                      const unmappedQuestions = questions.filter((tq, ti) => ti !== i && !tq.autoFillMapping);
+                      return <div style={{ marginTop: 8, padding: 10, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 6 }}>Auto-fill Mappings</span>
+                        {existingMappings.length === 0 && <span style={{ fontSize: 11, color: T.textMut, display: "block", marginBottom: 6 }}>No mappings configured yet.</span>}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {existingMappings.map((m, mi) => {
+                            const srcField = srcQ[Number(m.sourceFieldIdx)];
+                            return <div key={mi} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", background: T.bg, borderRadius: T.radSm, border: `1px solid ${T.border}`, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 11, color: T.text, fontWeight: 500, minWidth: 80 }}>{m.targetText}</span>
+                              <span style={{ fontSize: 10, color: T.textMut }}>pulls from:</span>
+                              <select value={m.sourceFieldIdx} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, sourceFieldIdx: e.target.value } })}
+                                style={{ flex: 1, minWidth: 100, padding: "3px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
+                                <option value="">— Select —</option>
+                                {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
+                              </select>
+                              <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
+                                <input type="checkbox" checked={m.readOnly} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, readOnly: e.target.checked } })} style={{ accentColor: T.accent }} />
+                                Read-only
+                              </label>
+                              <button onClick={() => updateQ(m.targetIdx, { autoFillMapping: null })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Icon name="x" size={12} color={T.danger} /></button>
+                            </div>;
+                          })}
+                        </div>
+                        {unmappedQuestions.length > 0 && <AutoFillAddRow questions={questions} srcQ={srcQ} linkedIdx={i} onAdd={(targetIdx, sourceFieldIdx, readOnly) => updateQ(targetIdx, { autoFillMapping: { sourceFieldIdx: String(sourceFieldIdx), readOnly } })} />}
+                      </div>;
                     })()}
                   </div>
                 )}

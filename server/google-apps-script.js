@@ -3060,7 +3060,7 @@ function buildApprovedEntriesCache(checklists) {
         if (!cache[srcId]) {
           cache[srcId] = getApprovedEntriesForChecklist(srcId);
         }
-        // Add quantity info for this consumer
+        // Add quantity info — unified to QuantityAllocations as single source of truth
         var qtyConfig = CHAIN_CONFIG.quantityTracking[ck2.id];
         if (qtyConfig && cache[srcId]) {
           for (var e = 0; e < cache[srcId].length; e++) {
@@ -3071,10 +3071,11 @@ function buildApprovedEntriesCache(checklists) {
                 totalQty = parseFloat(entry.responses[r].response) || 0; break;
               }
             }
-            var usedQty = getUsedQuantity(ck2.id, entry.autoId || entry.linkedId, qtyConfig.consumerQuantityField, "");
+            var entryAutoIdC = entry.autoId || entry.linkedId;
+            var allocQtyC = getAllocatedQuantityForAutoId(entryAutoIdC);
             entry.totalQuantity = totalQty;
-            entry.usedQuantity = usedQty;
-            entry.remainingQuantity = totalQty - usedQty;
+            entry.usedQuantity = allocQtyC;
+            entry.remainingQuantity = totalQty - allocQtyC;
           }
         }
         break;
