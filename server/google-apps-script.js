@@ -2720,7 +2720,9 @@ function handleTagUntagged(body, user) {
   }
 
   var totalQ = parseFloat(ut.total_quantity) || 0;
-  var currentTaggedQ = parseFloat(ut.tagged_quantity) || 0;
+  // Single source of truth: QuantityAllocations for remaining calculation
+  var allocatedQ = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
+  var currentTaggedQ = Math.max(parseFloat(ut.tagged_quantity) || 0, allocatedQ);
 
   // If no quantity tracking (totalQ=0) or no partial quantity specified, do full tag
   if (totalQ <= 0 || tagQuantity <= 0) tagQuantity = totalQ > 0 ? (totalQ - currentTaggedQ) : 0;
@@ -3612,14 +3614,8 @@ function validateQuantityEdit(checklistType, entryAutoId, newQuantity) {
     return { allowed: true, reason: "", downstreamTotal: allocTotal };
   }
 
-  // Sum downstream usage from QuantityAllocations (preferred) and from response sheets
-  var allocTotal2 = getAllocatedQuantityForAutoId(entryAutoId);
-  var consumerCk = lookupChecklist(cfg.consumerCkId);
-  var sheetUsed = 0;
-  if (consumerCk) {
-    sheetUsed = getUsedQuantity(cfg.consumerCkId, entryAutoId, cfg.fieldName, "");
-  }
-  var downstreamTotal = Math.max(allocTotal2, sheetUsed);
+  // Single source of truth: QuantityAllocations
+  var downstreamTotal = getAllocatedQuantityForAutoId(entryAutoId);
 
   if (newQuantity < downstreamTotal) {
     return {
@@ -4859,6 +4855,7 @@ function handleCreateAllocation(body, user) {
     if (!sourceCk) {
       var uts = getRows(SHEETS.UNTAGGED_CHECKLISTS);
       for (var j = 0; j < uts.length; j++) {
+        if (isDeleted(uts[j])) continue;
         if (String(uts[j].auto_id) === sourceAutoId) { sourceCk = lookupChecklist(uts[j].checklist_id); break; }
       }
     }
@@ -4941,6 +4938,7 @@ function findSubmissionByAutoId(autoId, ck) {
   ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
   var uts = getRows(SHEETS.UNTAGGED_CHECKLISTS);
   for (var j = 0; j < uts.length; j++) {
+    if (isDeleted(uts[j])) continue;
     if (String(uts[j].auto_id) === String(autoId) && String(uts[j].checklist_id) === String(ck.id)) {
       var responses = safeParseJSON(uts[j].responses, []);
       return { responses: responsesArrayToMap(responses) };
@@ -5155,6 +5153,7 @@ function handleTagChecklistToStage(body, user) {
     if (!sourceCk) {
       var uts2 = getRows(SHEETS.UNTAGGED_CHECKLISTS);
       for (var ui2 = 0; ui2 < uts2.length; ui2++) {
+        if (isDeleted(uts2[ui2])) continue;
         if (String(uts2[ui2].auto_id) === String(responseId)) { sourceCk = lookupChecklist(uts2[ui2].checklist_id); break; }
       }
     }
