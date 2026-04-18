@@ -2605,12 +2605,22 @@ function handleSubmitUntagged(body, user) {
 
   if (isMultiBatchRoast) {
     // Store batch JSON in Shipment column + fill summary fields
-    if (respArray.length > 0) respArray[0] = JSON.stringify(utRoastBatches);
+    var batchesJsonUt = JSON.stringify(utRoastBatches);
+    if (respArray.length > 0) respArray[0] = batchesJsonUt;
     var utTotalIn = 0, utTotalOut = 0;
     for (var uti = 0; uti < utRbVal.processed.length; uti++) { utTotalIn += utRbVal.processed[uti].inputQty; utTotalOut += utRbVal.processed[uti].outputQty; }
     if (respArray.length > 3) respArray[3] = String(utTotalIn);
     if (respArray.length > 4) respArray[4] = String(utTotalOut);
     if (respArray.length > 6) respArray[6] = String(Math.round((utTotalIn - utTotalOut) * 100) / 100);
+    // Also update the stored responses in UntaggedChecklists so batch data is in both places
+    var storedResponses = safeParseJSON(obj.responses, []);
+    for (var sri = 0; sri < storedResponses.length; sri++) {
+      if (storedResponses[sri].questionText === "Shipment number used" || storedResponses[sri].questionIndex === 0) { storedResponses[sri].response = batchesJsonUt; break; }
+    }
+    obj.responses = JSON.stringify(storedResponses);
+    var utIdxForUpdate = findRowIndex(SHEETS.UNTAGGED_CHECKLISTS, id);
+    if (utIdxForUpdate > 0) updateSheetRow(SHEETS.UNTAGGED_CHECKLISTS, utIdxForUpdate, obj);
+    invalidateCache(SHEETS.UNTAGGED_CHECKLISTS);
     // Inventory per-batch (skip legacy processInventoryLinks)
     applyRoastBatchInventory(utRbVal.processed, "untagged", id, person);
     if (autoId) applyRoastBatchAllocations(utRbVal.processed, autoId, "checklist", id, person);
@@ -2625,6 +2635,13 @@ function handleSubmitUntagged(body, user) {
     var hasInventoryLinkQuestionsUt = nqForInvCheckUt.some(function(q) { return q.inventoryLink && q.inventoryLink.enabled; });
     if (hasInventoryLinkQuestionsUt) {
       processInventoryLinks(ck, responsesMap, "untagged", id, person, false);
+    } else {
+      // Legacy path — for templates without inventoryLink configs
+      var respMapByText2 = {};
+      for (var ri3 = 0; ri3 < responses.length; ri3++) {
+        respMapByText2[responses[ri3].questionText] = responses[ri3].response || "";
+      }
+      applyLegacyInventoryForChecklist(ck, respMapByText2, "checklist", id, person, body.inventoryItemId || "", body.inventoryOutputItemId || "", false, body.grindClassificationId || "");
     }
     if (autoId) processQuantityAllocationsForSubmission(ck, responsesMap, batchAllocations, autoId, "checklist", id, person, "", true);
   }
@@ -3845,16 +3862,21 @@ function handleRunTests(user) {
     testIds.items.push(gbItem.id);
     var rbItem = handleCreateInventoryItem({ name: "TEST_RB_ITEM", abbreviation: "TRBI", category: "Roasted Beans", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
     testIds.items.push(rbItem.id);
-    handleUpdateInventoryItem({ id: gbItem.id, equivalentItems: [{ category: "Roasted Beans", itemId: rbItem.id }] }, testUser);
-    handleUpdateInventoryItem({ id: rbItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }] }, testUser);
+    var pkItem = handleCreateInventoryItem({ name: "TEST_PK_ITEM", abbreviation: "TPKI", category: "Packing Items", unit: "kg", openingStock: 0, equivalentItems: [] }, testUser);
+    testIds.items.push(pkItem.id);
+    handleUpdateInventoryItem({ id: gbItem.id, equivalentItems: [{ category: "Roasted Beans", itemId: rbItem.id }, { category: "Packing Items", itemId: pkItem.id }] }, testUser);
+    handleUpdateInventoryItem({ id: rbItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }, { category: "Packing Items", itemId: pkItem.id }] }, testUser);
+    handleUpdateInventoryItem({ id: pkItem.id, equivalentItems: [{ category: "Green Beans", itemId: gbItem.id }, { category: "Roasted Beans", itemId: rbItem.id }] }, testUser);
     invalidateCache(SHEETS.INVENTORY_ITEMS);
     var items = getRows(SHEETS.INVENTORY_ITEMS);
     var foundGb = items.find(function(r) { return r.id === gbItem.id; });
     var foundRb = items.find(function(r) { return r.id === rbItem.id; });
+    var foundPk = items.find(function(r) { return r.id === pkItem.id; });
     t1Checks.push(checkTruthy("Green Bean item created", !!foundGb));
     t1Checks.push(checkTruthy("Roasted Bean item created", !!foundRb));
+    t1Checks.push(checkTruthy("Packing Item created", !!foundPk));
     var gbEq = safeParseJSON(foundGb ? foundGb.equivalent_items : "[]", []);
-    t1Checks.push(check("GB equivalent links to RB", gbEq.length > 0 && gbEq[0].itemId === rbItem.id, true));
+    t1Checks.push(check("GB has 2 equivalents", gbEq.length, 2));
   } catch (e) { t1Checks.push({ check: "Inventory creation", result: "FAIL", detail: e.message }); }
   results.push({ testNumber: 1, testName: "Inventory Items", status: t1Checks.every(function(c) { return c.result === "PASS"; }) ? "PASS" : "FAIL", checks: t1Checks });
 
@@ -4168,9 +4190,11 @@ function handleRunTests(user) {
     var qaSheet = getSheet(SHEETS.QUANTITY_ALLOCATIONS);
     if (qaSheet) {
       var qaData = qaSheet.getDataRange().getValues();
+      var qaHeaders = qaData[0].map(String);
+      var qaAllocByCol = qaHeaders.indexOf("allocated_by");
       var qaDel = 0;
       for (var qa = qaData.length - 1; qa >= 1; qa--) {
-        if (String(qaData[qa][8] || "") === "TEST_RUNNER") { qaSheet.deleteRow(qa + 1); qaDel++; }
+        if (qaAllocByCol >= 0 && String(qaData[qa][qaAllocByCol] || "") === "TEST_RUNNER") { qaSheet.deleteRow(qa + 1); qaDel++; }
       }
       cleanupDeleted += qaDel;
       if (qaDel > 0) sheetsAffected.push("QuantityAllocations");
@@ -4180,9 +4204,11 @@ function handleRunTests(user) {
     var auditSheet = getSheet(SHEETS.AUDIT_LOG);
     if (auditSheet) {
       var auditData = auditSheet.getDataRange().getValues();
+      var auditHeaders = auditData[0].map(String);
+      var auditUserCol = auditHeaders.indexOf("user_name");
       var auditDel = 0;
       for (var a = auditData.length - 1; a >= 1; a--) {
-        if (String(auditData[a][2] || "") === "TEST_RUNNER") { auditSheet.deleteRow(a + 1); auditDel++; }
+        if (auditUserCol >= 0 && String(auditData[a][auditUserCol] || "") === "TEST_RUNNER") { auditSheet.deleteRow(a + 1); auditDel++; }
       }
       cleanupDeleted += auditDel;
       if (auditDel > 0) sheetsAffected.push("AuditLog");
