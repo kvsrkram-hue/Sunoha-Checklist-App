@@ -1777,6 +1777,35 @@ function findInventoryItemForCategory(sourceRef, targetCategory) {
 }
 
 // Process per-question inventoryLink configs to create inventory transactions.
+// Read a response value from responsesMap by matching question text in `nq`. Returns "" when
+// no matching non-empty response is found. Used as a fallback when inventoryLink.fieldIdx
+// points at the wrong index (e.g. after a template field reorder or addition).
+function findResponseByQuestionText(nq, responsesMap, text) {
+  if (!Array.isArray(nq) || !text) return "";
+  for (var i = 0; i < nq.length; i++) {
+    if (nq[i] && nq[i].text === text && responsesMap[i] !== undefined && responsesMap[i] !== "") {
+      return String(responsesMap[i]);
+    }
+  }
+  return "";
+}
+
+// Locate a response whose question text contains ANY of the given substrings (case-insensitive).
+// Returns the non-empty response value or "".
+function findResponseByQuestionTextContains(nq, responsesMap, substrings) {
+  if (!Array.isArray(nq) || !Array.isArray(substrings)) return "";
+  for (var i = 0; i < nq.length; i++) {
+    var qt = String((nq[i] && nq[i].text) || "").toLowerCase();
+    if (!qt) continue;
+    for (var s = 0; s < substrings.length; s++) {
+      if (qt.indexOf(String(substrings[s]).toLowerCase()) >= 0 && responsesMap[i] !== undefined && responsesMap[i] !== "") {
+        return String(responsesMap[i]);
+      }
+    }
+  }
+  return "";
+}
+
 function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, isEdit) {
   if (!checklist) {
     Logger.log("processInventoryLinks: no checklist, skipping");
@@ -1802,18 +1831,49 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
   for (var i = 0; i < nq.length; i++) {
     var q = nq[i];
     if (!q.inventoryLink || !q.inventoryLink.enabled) continue;
+    var link = q.inventoryLink;
+    var txType = link.txType || "IN";
     var rawQty = responsesMap[i];
     var qty = parseFloat(rawQty);
-    Logger.log("  q[" + i + "] " + q.text + " inventoryLink=" + JSON.stringify(q.inventoryLink) + " qty=" + qty);
-    // Reject negative or non-numeric quantities — checklist submissions must never write a
-    // negative inventory change. The legitimate way to reduce stock below a prior entry is
-    // a manual OUT adjustment.
-    if (isNaN(qty) || qty < 0) {
-      Logger.log("  → WARNING: Skipped negative/invalid qty for " + (q.text || "question " + i) + ": " + rawQty);
+    Logger.log("  q[" + i + "] " + q.text + " inventoryLink=" + JSON.stringify(link) + " qty=" + qty);
+
+    // Reject negative quantities — never write a negative inventory change via a checklist.
+    if (!isNaN(qty) && qty < 0) {
+      Logger.log("  → WARNING: Skipped negative qty for " + (q.text || "question " + i) + ": " + rawQty);
       continue;
     }
-    if (qty === 0) { Logger.log("  → qty=0, skipping"); continue; }
-    var link = q.inventoryLink;
+
+    // ── Fix 1 + Fix 3: index-shift-resilient quantity read ──
+    // If the indexed lookup returned 0 or NaN, try well-known field names by text so a shifted
+    // index (caused by added/reordered questions) still finds the intended quantity.
+    if (isNaN(qty) || qty === 0) {
+      Logger.log("  → qty=0/NaN, trying text-based fallback for: " + q.text);
+      var qtyFallbackNames;
+      if (txType === "OUT") qtyFallbackNames = ["Quantity input", "Input Weight", "Input weight"];
+      else qtyFallbackNames = ["Total Net weight", "Net Weight", "Quantity output", "Quantity received"];
+      for (var qf = 0; qf < qtyFallbackNames.length; qf++) {
+        var fv = findResponseByQuestionText(nq, responsesMap, qtyFallbackNames[qf]);
+        var fqty = parseFloat(fv);
+        if (!isNaN(fqty) && fqty > 0) {
+          Logger.log("  → qty text-fallback matched '" + qtyFallbackNames[qf] + "' = " + fqty);
+          qty = fqty;
+          break;
+        }
+      }
+      // Last-ditch substring match for "weight"/"net" on IN-side fields
+      if ((isNaN(qty) || qty === 0) && txType === "IN") {
+        var fq2 = findResponseByQuestionTextContains(nq, responsesMap, ["net weight", "weight", "output"]);
+        var fqty2 = parseFloat(fq2);
+        if (!isNaN(fqty2) && fqty2 > 0) {
+          Logger.log("  → qty substring-fallback matched weight/output = " + fqty2);
+          qty = fqty2;
+        }
+      }
+    }
+
+    if (isNaN(qty) || qty <= 0) { Logger.log("  → qty unresolved (<=0), skipping"); continue; }
+    if (String(checklist.id) === "ck_grinding") Logger.log("  → Grinding " + txType + " qty resolved to: " + qty);
+
     var itemId = "";
     var linkWarning = "";
     if (link.itemSource && link.itemSource.type === "fixed") {
@@ -1822,6 +1882,55 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
     } else if (link.itemSource && link.itemSource.type === "field") {
       var srcVal = responsesMap[link.itemSource.fieldIdx];
       Logger.log("  → field source idx=" + link.itemSource.fieldIdx + " value=" + srcVal);
+
+      // ── Fix 2: text-based fallback for item reference when fieldIdx empty ──
+      if (!srcVal) {
+        var cat = String(link.category || "").toLowerCase();
+        var textFallbacks = [];
+        if (cat === "green beans" || cat === "roasted beans") {
+          textFallbacks = ["Type of Beans", "Type of Bean"];
+        } else if (cat === "packing items") {
+          textFallbacks = ["Roast ID"];
+        }
+        for (var tf = 0; tf < textFallbacks.length; tf++) {
+          var fv3 = findResponseByQuestionText(nq, responsesMap, textFallbacks[tf]);
+          if (fv3) { srcVal = fv3; Logger.log("  → item source text-fallback matched '" + textFallbacks[tf] + "' = " + srcVal); break; }
+        }
+        // Also try: any linkedSource.checklistId === ck_roasted_beans (grinding typically)
+        if (!srcVal) {
+          for (var lqi = 0; lqi < nq.length; lqi++) {
+            var lsCk = nq[lqi] && nq[lqi].linkedSource && nq[lqi].linkedSource.checklistId;
+            if (lsCk === "ck_roasted_beans" && responsesMap[lqi]) {
+              srcVal = String(responsesMap[lqi]);
+              Logger.log("  → item source fallback via linkedSource ck_roasted_beans at idx=" + lqi + " value=" + srcVal);
+              break;
+            }
+          }
+        }
+      }
+
+      // Grinding chain: if srcVal is a Roast ID (auto_id of a ck_roasted_beans submission),
+      // follow it to its "Type of Beans" so equivalent_items can map into the target category.
+      if (srcVal && String(checklist.id) === "ck_grinding") {
+        var roastCk = lookupChecklist("ck_roasted_beans");
+        if (roastCk) {
+          var roastSub = findSubmissionByAutoId(srcVal, roastCk);
+          if (roastSub && roastSub.responses) {
+            var rbQs = roastCk.questions || [];
+            for (var rqi = 0; rqi < rbQs.length; rqi++) {
+              if (rbQs[rqi] && (rbQs[rqi].text === "Type of Beans" || rbQs[rqi].text === "Type of Bean")) {
+                var beanRef = roastSub.responses[rqi] || roastSub.responses[String(rqi)] || "";
+                if (beanRef) {
+                  Logger.log("  → Grinding chain: Roast ID " + srcVal + " → Type of Beans = " + beanRef);
+                  srcVal = String(beanRef);
+                }
+                break;
+              }
+            }
+          }
+        }
+      }
+
       if (srcVal) {
         var resolved = findInventoryItemForCategory(srcVal, link.category || "");
         if (resolved.item) {
@@ -1835,7 +1944,6 @@ function processInventoryLinks(checklist, responsesMap, refType, refId, doneBy, 
       }
     }
     if (itemId) {
-      var txType = link.txType || "IN";
       var dupKey = String(refId || "") + "|" + String(i) + "|" + String(txType);
       if (!isEdit && existingKey[dupKey]) {
         Logger.log("  → WARNING: Duplicate inventory entry prevented for refId: " + refId + " (questionIndex=" + i + ", type=" + txType + ")");

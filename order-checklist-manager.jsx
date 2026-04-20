@@ -434,7 +434,7 @@ const Toggle = ({ active, onClick, label, sub }) => (
 
 // ─── Question Input Renderer ─────────────────────────────────
 
-function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData, setFormData, approvedEntries, checklists, getFieldValue, orders, customers, inventoryItems, onBatchAllocChange, allQuestions, onInventoryAutoFill }) {
+function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData, setFormData, approvedEntries, checklists, getFieldValue, orders, customers, inventoryItems, onBatchAllocChange, allQuestions, onInventoryAutoFill, checklistId, classificationFieldMapping, classifications }) {
   const [negativeError, setNegativeError] = useState(false);
   useEffect(() => { if (negativeError) { const t = setTimeout(() => setNegativeError(false), 3500); return () => clearTimeout(t); } }, [negativeError]);
   const isAutoFilled = !!(formData.autoFilled && formData.autoFilled[qi]);
@@ -711,6 +711,40 @@ function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData
         break;
       }
     }
+  }
+
+  // Classification dropdown branch — fires when this question is mapped as a
+  // roast_degree or grind_size field via Classification Field Mapping (Settings).
+  // Renders as a dropdown sourced from classifications.{roast_degree|grind_size}.
+  // The response value is always the classification id; display shows the name.
+  const classType = (() => {
+    if (!classificationFieldMapping || !checklistId) return null;
+    const m = classificationFieldMapping;
+    if (m.roast_degree && String(m.roast_degree.checklistId) === String(checklistId) && Number(m.roast_degree.fieldIndex) === Number(qi)) return "roast_degree";
+    if (m.grind_size && String(m.grind_size.checklistId) === String(checklistId) && Number(m.grind_size.fieldIndex) === Number(qi)) return "grind_size";
+    return null;
+  })();
+  if (classType) {
+    const opts = (classifications && classifications[classType]) || [];
+    const placeholder = classType === "roast_degree" ? "Select roast degree..." : "Select grind size...";
+    const classLabel = classType === "roast_degree" ? "Roast Degree" : "Grind Size";
+    return (
+      <div key={qi}>
+        <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
+          <span style={{fontSize:11,color:T.textMut,fontFamily:T.mono,flexShrink:0,marginTop:1}}>{String(qi+1).padStart(2,"0")}</span>
+          <span style={{fontSize:13,color:T.textSec,lineHeight:1.4,flex:1}}>{q.text}</span>
+          <Badge variant="info" style={{fontSize:9}}>{classLabel}</Badge>
+          {isAutoFilled&&<Badge variant="info" style={{fontSize:9}}>Auto-filled from {autoFilledSource||"source"}</Badge>}
+        </div>
+        <select value={currentVal||""} disabled={isAutoFilled&&autoFilledReadOnly} onChange={e=>{if(isAutoFilled&&autoFilledReadOnly)return;setFormData(p=>({...p,responses:{...p.responses,[qi]:e.target.value}}))}}
+          style={{width:"100%",padding:"12px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:15,outline:"none",opacity:(isAutoFilled&&autoFilledReadOnly)?0.7:1}}>
+          <option value="">— {placeholder} —</option>
+          {opts.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+          {/* Legacy value fallback — if currentVal isn't an option id, show it as-is so old data stays visible */}
+          {currentVal && !opts.some(o => String(o.id) === String(currentVal)) && <option value={currentVal}>{currentVal}</option>}
+        </select>
+      </div>
+    );
   }
 
   // Default text/number input
@@ -2380,6 +2414,11 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   const [roastBatches,setRoastBatches]=useState([{sourceAutoId:"",inputQty:"",outputQty:"",reasonForLoss:"",classificationId:""}]);
   const [classifications,setClassifications]=useState(null);
   const [grindClassificationId,setGrindClassificationId]=useState("");
+  const [classificationFieldMapping,setClassificationFieldMapping]=useState({});
+  useEffect(()=>{
+    if(!classifications) API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+    API.get("getClassificationFieldMapping").then(d=>{if(d&&!d.error)setClassificationFieldMapping(d||{})}).catch(()=>{});
+  },[]);
 
   const ck=checklists.find(c=>c.id===selCkId);
   const nq=ck?normalizeQuestions(ck.questions):[];
@@ -2702,6 +2741,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
                   formData={formData} setFormData={setFormData} approvedEntries={approvedEntries} checklists={checklists} getFieldValue={getFieldValue}
                   orders={selCkId==="ck_grinding"?orders:null} customers={customers}
                   inventoryItems={inventoryItems} onBatchAllocChange={onBatchAllocChange} allQuestions={nq}
+                  checklistId={selCkId} classificationFieldMapping={classificationFieldMapping} classifications={classifications||{roast_degree:[],grind_size:[]}}
                   onInventoryAutoFill={(item)=>{
                     if(!item){setInvItemId("");setInvOutputItemId("");return;}
                     setInvItemId(item.id);
@@ -4070,6 +4110,12 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
   const [editingStages,setEditingStages]=useState(false);
   const [taggedEntryView,setTaggedEntryView]=useState(null); // {checklistId, autoId}
   const [invError,setInvError]=useState({idx:null,message:""});
+  const [classifications,setClassifications]=useState({roast_degree:[],grind_size:[]});
+  const [classificationFieldMapping,setClassificationFieldMapping]=useState({});
+  useEffect(()=>{
+    API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+    API.get("getClassificationFieldMapping").then(d=>{if(d&&!d.error)setClassificationFieldMapping(d||{})}).catch(()=>{});
+  },[]);
 
   const pending=order.checklists.filter(c=>c.status==="pending");
   const completed=order.checklists.filter(c=>c.status==="completed");
@@ -4551,6 +4597,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
                             formData={formData} setFormData={setFormData} approvedEntries={approvedEntries} checklists={checklists} getFieldValue={getFieldValue}
                             orders={item.checklistId==="ck_grinding"?null:null} customers={customers}
                             inventoryItems={inventoryItems} onBatchAllocChange={onBatchAllocChange} allQuestions={ckNq}
+                            checklistId={item.checklistId} classificationFieldMapping={classificationFieldMapping} classifications={classifications}
                             onInventoryAutoFill={(item2)=>{
                               if(!item2){setInvItemId("");setInvOutputItemId("");return;}
                               setInvItemId(item2.id);
@@ -4703,8 +4750,14 @@ function EditResponseView({ orderChecklistId, checklistId, checklists, approvedE
   const [meta,setMeta]=useState({autoId:"",lastEditedBy:"",lastEditedAt:"",accessControl:{isTaggedToStage:false,stageRefs:[],linkedByOthers:[],editable:true}});
   const [error,setError]=useState("");
   const [inventoryError,setInventoryError]=useState({idx:null,message:""});
+  const [classifications,setClassifications]=useState({roast_degree:[],grind_size:[]});
+  const [classificationFieldMapping,setClassificationFieldMapping]=useState({});
   const ck = checklists.find(c => c.id === checklistId);
   const nq = ck ? normalizeQuestions(ck.questions) : [];
+  useEffect(()=>{
+    API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+    API.get("getClassificationFieldMapping").then(d=>{if(d&&!d.error)setClassificationFieldMapping(d||{})}).catch(()=>{});
+  },[]);
 
   useEffect(() => {
     const action = isUntagged ? "getUntaggedResponse" : "getResponses";
@@ -4863,7 +4916,8 @@ function EditResponseView({ orderChecklistId, checklistId, checklists, approvedE
               )}
               <QuestionInputField q={q} qi={qi} currentVal={currentVal} idealVal={idealVal} needsRemark={needsRemark}
                 formData={formData} setFormData={setFormData} approvedEntries={approvedEntries} checklists={checklists} getFieldValue={getFieldValue}
-                customers={customers} inventoryItems={inventoryItems} allQuestions={nq}/>
+                customers={customers} inventoryItems={inventoryItems} allQuestions={nq}
+                checklistId={checklistId} classificationFieldMapping={classificationFieldMapping} classifications={classifications}/>
             </div>
           );
         })}
@@ -6259,41 +6313,10 @@ function EditChecklistView({ checklist, allChecklists, onSave, inventoryItems, i
                           : <Badge variant="danger" style={{ fontSize: 10 }}>{!hasGate && !hasAutoId ? "Source needs both Approval Gate and Auto ID enabled" : !hasGate ? "Source needs Approval Gate configured" : "Source checklist must have Auto ID enabled for linking to work"}</Badge>}
                       </div>;
                     })()}
-                    {/* Auto-fill mappings — centralized builder */}
-                    {q.linkedSource.checklistId && (() => {
-                      const src = (allChecklists || []).find(c => c.id === q.linkedSource.checklistId);
-                      if (!src) return null;
-                      const srcQ = normalizeQuestions(src.questions);
-                      const existingMappings = questions.map((tq, ti) => {
-                        if (ti === i || !tq.autoFillMapping || tq.autoFillMapping.sourceFieldIdx === "" || tq.autoFillMapping.sourceFieldIdx === undefined) return null;
-                        return { targetIdx: ti, targetText: tq.text, sourceFieldIdx: tq.autoFillMapping.sourceFieldIdx, readOnly: tq.autoFillMapping.readOnly !== false };
-                      }).filter(Boolean);
-                      const unmappedQuestions = questions.filter((tq, ti) => ti !== i && !tq.autoFillMapping);
-                      return <div style={{ marginTop: 8, padding: 10, background: T.surface, borderRadius: T.radSm, border: `1px solid ${T.border}` }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: T.textSec, display: "block", marginBottom: 6 }}>Auto-fill Mappings</span>
-                        {existingMappings.length === 0 && <span style={{ fontSize: 11, color: T.textMut, display: "block", marginBottom: 6 }}>No mappings configured yet.</span>}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                          {existingMappings.map((m, mi) => {
-                            const srcField = srcQ[Number(m.sourceFieldIdx)];
-                            return <div key={mi} style={{ display: "flex", gap: 6, alignItems: "center", padding: "6px 8px", background: T.bg, borderRadius: T.radSm, border: `1px solid ${T.border}`, flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 11, color: T.text, fontWeight: 500, minWidth: 80 }}>{m.targetText}</span>
-                              <span style={{ fontSize: 10, color: T.textMut }}>pulls from:</span>
-                              <select value={m.sourceFieldIdx} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, sourceFieldIdx: e.target.value } })}
-                                style={{ flex: 1, minWidth: 100, padding: "3px 6px", borderRadius: T.radSm, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 11 }}>
-                                <option value="">— Select —</option>
-                                {srcQ.map((sq, si) => <option key={si} value={si}>{sq.text || `Q${si + 1}`}</option>)}
-                              </select>
-                              <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.textSec, cursor: "pointer", whiteSpace: "nowrap" }}>
-                                <input type="checkbox" checked={m.readOnly} onChange={e => updateQ(m.targetIdx, { autoFillMapping: { ...questions[m.targetIdx].autoFillMapping, readOnly: e.target.checked } })} style={{ accentColor: T.accent }} />
-                                Read-only
-                              </label>
-                              <button onClick={() => updateQ(m.targetIdx, { autoFillMapping: null })} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Icon name="x" size={12} color={T.danger} /></button>
-                            </div>;
-                          })}
-                        </div>
-                        {unmappedQuestions.length > 0 && <AutoFillAddRow questions={questions} srcQ={srcQ} linkedIdx={i} onAdd={(targetIdx, sourceFieldIdx, readOnly) => updateQ(targetIdx, { autoFillMapping: { sourceFieldIdx: String(sourceFieldIdx), readOnly } })} />}
-                      </div>;
-                    })()}
+                    {/* Per-question auto-fill mappings are configured on each target field's own card
+                        (see "Auto-fill from [source]" section below each question). Guard Rail 10:
+                        target label must be the current question's own name — so we don't list
+                        other questions' mappings on this linked-source card. */}
                   </div>
                 )}
 
