@@ -1259,6 +1259,12 @@ export default function App() {
           onCreateCategory={async(name)=>{
             try{const r=await API.post("createInventoryCategory",{name});setInventoryCategories(prev=>[...prev,r]);addToast("Category added","success")}catch(e){addToast(e.message,"error")}
           }}
+          onAdjust={async(data)=>{
+            try{const r=await API.post("addInventoryAdjustment",data);
+              try{const fresh=await API.get("getInventoryItems");setInventoryItems(fresh||[])}catch{setInventoryItems(prev=>prev.map(i=>i.id===data.itemId?{...i,currentStock:r.newStock}:i))}
+              try{const s=await API.get("getInventorySummary");setInventorySummary(s)}catch{}
+              addToast("Adjustment saved","success");return r}catch(e){addToast(e.message,"error");throw e}
+          }}
         />}
 
         {currentView==="inventoryLedger" && selected && <InventoryLedgerView item={selected} isAdmin={isAdmin} addToast={addToast}
@@ -1525,6 +1531,11 @@ function OrdersView({orders,checklists,orderTypes,customers,isAdmin,busy,untagge
                           {ut.taggedOrderId&&ut.taggedOrderId!=="UNTAGGED"&&<OrderBadge orderId={ut.taggedOrderId} orders={orders} orderTypes={orderTypes} customers={customers}/>}
                           {ut.person&&<span style={{fontSize:12,color:T.textSec}}>by {ut.person}</span>}
                           {ut.date&&<span style={{fontSize:12,color:T.textMut}}>{ut.date}</span>}
+                        </div>
+                        <div style={{display:"flex",gap:4,marginBottom:4,flexWrap:"wrap",alignItems:"center"}}>
+                          {ut.roastDegreeLabel&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:8,background:"rgba(237,138,50,0.15)",color:"#ed8a32",border:"1px solid rgba(237,138,50,0.3)",fontWeight:600}}>{ut.roastDegreeLabel}</span>}
+                          {ut.grindSizeLabel&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:8,background:"rgba(80,145,235,0.15)",color:"#5091eb",border:"1px solid rgba(80,145,235,0.3)",fontWeight:600}}>{ut.grindSizeLabel}</span>}
+                          {!ut.roastDegreeLabel&&!ut.grindSizeLabel&&<span style={{fontSize:10,padding:"2px 6px",borderRadius:8,background:T.surfaceHover,color:T.textMut,border:`1px solid ${T.border}`}}>Unclassified</span>}
                         </div>
                         {ut.totalQuantity>0&&<>
                           <div style={{display:"flex",gap:8,fontSize:11,marginBottom:4}}>
@@ -3155,7 +3166,7 @@ function BlendLineStageSection({
       if (reqCkId && String(u.checklistId) !== String(reqCkId)) return;
       const rem = parseFloat(u.remainingQuantity);
       if (rem <= 0 || !u.autoId) return;
-      const rec = { autoId: u.autoId, checklistId: u.checklistId, remaining: rem, responses: u.responses, date: u.date };
+      const rec = { autoId: u.autoId, checklistId: u.checklistId, remaining: rem, responses: u.responses, date: u.date, roastDegreeId: u.roastDegreeId || "", roastDegreeLabel: u.roastDegreeLabel || "", grindSizeId: u.grindSizeId || "", grindSizeLabel: u.grindSizeLabel || "" };
       all.push(rec);
       if (!canFilter) return;
       const te = { checklistId: u.checklistId, autoId: u.autoId, responses: u.responses };
@@ -3258,6 +3269,10 @@ function BlendLineStageSection({
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap"}}>
                   <div style={{flex:1,minWidth:180}}>
                     <span style={{fontSize:13,fontWeight:500,color:T.text}}>{ing.component.itemName || "Unknown"}</span>
+                    <div style={{display:"flex",gap:6,marginTop:3,flexWrap:"wrap"}}>
+                      {ing.component.roastDegreeLabel&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:6,background:"rgba(237,138,50,0.15)",color:"#ed8a32",border:"1px solid rgba(237,138,50,0.3)",fontWeight:600}}>Requires {ing.component.roastDegreeLabel}</span>}
+                      {ing.component.grindSizeLabel&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:6,background:"rgba(80,145,235,0.15)",color:"#5091eb",border:"1px solid rgba(80,145,235,0.3)",fontWeight:600}}>Requires {ing.component.grindSizeLabel}</span>}
+                    </div>
                     <div style={{display:"flex",gap:10,fontSize:11,color:T.textMut,marginTop:2,flexWrap:"wrap",fontFamily:T.mono}}>
                       <span>Req: <b style={{color:T.text}}>{ing.required}kg</b></span>
                       <span>Tagged: <b style={{color:ing.remaining<=0.01?T.success:T.warning}}>{ing.totalTagged}kg</b></span>
@@ -3317,7 +3332,13 @@ function BlendLineStageSection({
                           } else { setAutoReadValue(""); setQty(""); }
                         }} style={{width:"100%",padding:"8px 10px",borderRadius:T.radSm,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:12,marginBottom:6}}>
                           <option value="">— Select approved entry —</option>
-                          {avail.map(a=><option key={a.autoId} value={a.autoId}>{a.autoId} — {a.remaining}kg available</option>)}
+                          {avail.map(a=>{
+                            const roastMismatch = ing.component.roastDegreeId && a.roastDegreeId!==undefined && String(a.roastDegreeId)!==String(ing.component.roastDegreeId);
+                            const grindMismatch = ing.component.grindSizeId && a.grindSizeId!==undefined && String(a.grindSizeId)!==String(ing.component.grindSizeId);
+                            const mismatch = roastMismatch || grindMismatch;
+                            const tooltip = roastMismatch ? `Requires ${ing.component.roastDegreeLabel}` : grindMismatch ? `Requires ${ing.component.grindSizeLabel}` : "";
+                            return <option key={a.autoId} value={a.autoId} disabled={mismatch} title={tooltip} style={mismatch?{color:T.textMut}:undefined}>{a.autoId} — {a.remaining}kg{mismatch?` (mismatch: ${tooltip})`:""}</option>;
+                          })}
                         </select>
                         {pickedEntry && stage.quantityField && autoReadValue !== "" && (
                           <div style={{padding:"4px 8px",background:T.infoBg,border:`1px solid ${T.infoBorder}`,borderRadius:T.radSm,marginBottom:6}}>
@@ -5199,6 +5220,76 @@ function ClassificationsSection({ addToast }) {
   );
 }
 
+// ─── Classification Field Mapping Section ────────────────────
+
+function ClassificationFieldMappingSection({ checklists, addToast }) {
+  const [mapping, setMapping] = useState({ roast_degree: { checklistId: "", fieldIndex: "" }, grind_size: { checklistId: "", fieldIndex: "" } });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    API.get("getClassificationFieldMapping").then(d => {
+      if (d && !d.error) {
+        setMapping({
+          roast_degree: { checklistId: (d.roast_degree && d.roast_degree.checklistId) || "", fieldIndex: (d.roast_degree && (d.roast_degree.fieldIndex !== undefined && d.roast_degree.fieldIndex !== null) ? String(d.roast_degree.fieldIndex) : "") },
+          grind_size: { checklistId: (d.grind_size && d.grind_size.checklistId) || "", fieldIndex: (d.grind_size && (d.grind_size.fieldIndex !== undefined && d.grind_size.fieldIndex !== null) ? String(d.grind_size.fieldIndex) : "") },
+        });
+      }
+    }).catch(()=>{}).finally(()=>setLoading(false));
+  }, []);
+
+  const save = async (type) => {
+    setSaving(true);
+    try {
+      const payload = {
+        mapping: {
+          roast_degree: mapping.roast_degree.checklistId && mapping.roast_degree.fieldIndex !== "" ? { checklistId: mapping.roast_degree.checklistId, fieldIndex: parseInt(mapping.roast_degree.fieldIndex, 10) } : null,
+          grind_size: mapping.grind_size.checklistId && mapping.grind_size.fieldIndex !== "" ? { checklistId: mapping.grind_size.checklistId, fieldIndex: parseInt(mapping.grind_size.fieldIndex, 10) } : null,
+        },
+      };
+      await API.post("saveClassificationFieldMapping", payload);
+      addToast?.("Mapping saved", "success");
+    } catch (e) { addToast?.(e.message, "error"); }
+    setSaving(false);
+  };
+
+  const renderRow = (type, label) => {
+    const m = mapping[type];
+    const ck = checklists.find(c => c.id === m.checklistId);
+    const qs = ck ? (ck.questions || []) : [];
+    return (
+      <div style={{background:T.card,borderRadius:T.rad,padding:12,border:`1px solid ${T.border}`,display:"flex",flexDirection:"column",gap:8}}>
+        <span style={{fontSize:13,fontWeight:600,color:T.text}}>{label}</span>
+        <div style={{display:"grid",gridTemplateColumns:"2fr 2fr auto",gap:6,alignItems:"center"}}>
+          <select value={m.checklistId} onChange={e=>setMapping(p=>({...p,[type]:{checklistId:e.target.value,fieldIndex:""}}))}
+            style={{padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:12}}>
+            <option value="">— Select checklist —</option>
+            {checklists.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select value={m.fieldIndex} onChange={e=>setMapping(p=>({...p,[type]:{...p[type],fieldIndex:e.target.value}}))} disabled={!ck}
+            style={{padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:12}}>
+            <option value="">— Select field —</option>
+            {qs.map((q,qi) => <option key={qi} value={qi}>{q.text}</option>)}
+          </select>
+          <Btn small disabled={saving} onClick={()=>save(type)}>{saving?"...":"Save"}</Btn>
+        </div>
+      </div>
+    );
+  };
+
+  if (loading) return <div style={{padding:20,textAlign:"center"}}><p style={{color:T.textMut,fontSize:13}}>Loading field mapping...</p></div>;
+  return (
+    <div>
+      <Section icon="layers">Classification Field Mapping</Section>
+      <p style={{fontSize:12,color:T.textMut,marginTop:-10,marginBottom:12}}>Map checklist fields to classification types so submissions auto-capture roast degree and grind size.</p>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {renderRow("roast_degree", "Roast Degree Field")}
+        {renderRow("grind_size", "Grind Size Field")}
+      </div>
+    </div>
+  );
+}
+
 // ─── Admin / Settings View ────────────────────────────────────
 
 // ─── Test Runner Section ─────────────────────────────────────
@@ -5636,6 +5727,9 @@ function AdminView({checklists,orderTypes,customers,rules,isAdmin,addToast,onEdi
 
       {/* ── Roast & Grind Classifications (Admin only) ── */}
       {isAdmin && <ClassificationsSection addToast={addToast}/>}
+
+      {/* ── Classification Field Mapping (Admin only) ── */}
+      {isAdmin && <ClassificationFieldMappingSection checklists={checklists} addToast={addToast}/>}
 
       {/* ── Audit Log (Admin only) ── */}
       {isAdmin && <AuditLogSection/>}
@@ -6381,13 +6475,19 @@ function EquivalentItemsEditor({ items, currentItem, value, onChange }) {
   );
 }
 
-function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLedger, onCreateItem, onUpdateItem, onCreateCategory }) {
+function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLedger, onCreateItem, onUpdateItem, onCreateCategory, onAdjust }) {
   const [activeTab,setActiveTab]=useState(categories[0]?.name||"Green Beans");
   const [showAdd,setShowAdd]=useState(false);
   const [newItem,setNewItem]=useState({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:""});
   const [newCat,setNewCat]=useState("");
   const [editId,setEditId]=useState(null);
   const [editData,setEditData]=useState({});
+  const [adjustItem,setAdjustItem]=useState(null);
+  const [adjType,setAdjType]=useState("addition");
+  const [adjQty,setAdjQty]=useState("");
+  const [adjNotes,setAdjNotes]=useState("");
+  const [adjSaving,setAdjSaving]=useState(false);
+  const [expandedBreakdown,setExpandedBreakdown]=useState({});
 
   const tabItems=items.filter(i=>i.category===activeTab&&i.isActive);
 
@@ -6400,7 +6500,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
   const handleCreate=()=>{
     if(!newItem.name.trim()||!newItem.category) return;
     const ab=String(newItem.abbreviation||"").toUpperCase();
-    if(!/^[A-Z0-9]{2,6}$/.test(ab)){addToast?.("Abbreviation must be 2-6 uppercase letters/digits","error");return;}
+    if(!/^[A-Z0-9]{2,15}$/.test(ab)){addToast?.("Abbreviation must be 2-15 uppercase letters/digits","error");return;}
     onCreateItem({...newItem,abbreviation:ab,openingStock:parseFloat(newItem.openingStock)||0,minStockAlert:parseFloat(newItem.minStockAlert)||0});
     setNewItem({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:""});setShowAdd(false);
   };
@@ -6466,8 +6566,8 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
       {showAdd&&(
         <div style={{background:T.card,borderRadius:T.rad,padding:16,border:`1px solid ${T.accentBorder}`,display:"flex",flexDirection:"column",gap:12}}>
           <Field label="Item Name"><Input value={newItem.name} onChange={v=>setNewItem(p=>({...p,name:v}))} placeholder="e.g., Arabica AA Grade"/></Field>
-          <Field label="Abbreviation (2-6 chars, uppercase)">
-            <Input value={newItem.abbreviation} onChange={v=>setNewItem(p=>({...p,abbreviation:v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6)}))} placeholder="e.g., ACAB" style={{textTransform:"uppercase",fontFamily:T.mono}}/>
+          <Field label="Abbreviation (2-15 chars, uppercase)">
+            <Input value={newItem.abbreviation} onChange={v=>setNewItem(p=>({...p,abbreviation:v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,15)}))} placeholder="e.g., ACAB" maxLength={15} style={{textTransform:"uppercase",fontFamily:T.mono}}/>
           </Field>
           <Field label="Category">
             <select value={newItem.category} onChange={e=>setNewItem(p=>({...p,category:e.target.value}))}
@@ -6502,8 +6602,8 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
               {editId===item.id?(
                 <div onClick={e=>e.stopPropagation()} style={{display:"flex",flexDirection:"column",gap:10}}>
                   <Field label="Name"><Input value={editData.name||""} onChange={v=>setEditData(p=>({...p,name:v}))}/></Field>
-                  <Field label="Abbreviation (2-6 chars, uppercase)">
-                    <Input value={editData.abbreviation||""} onChange={v=>setEditData(p=>({...p,abbreviation:v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6)}))} placeholder="e.g., ACAB" style={{textTransform:"uppercase",fontFamily:T.mono}}/>
+                  <Field label="Abbreviation (2-15 chars, uppercase)">
+                    <Input value={editData.abbreviation||""} onChange={v=>setEditData(p=>({...p,abbreviation:v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,15)}))} placeholder="e.g., ACAB" maxLength={15} style={{textTransform:"uppercase",fontFamily:T.mono}}/>
                   </Field>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                     <Field label="Unit">
@@ -6524,30 +6624,84 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
                   </div>
                 </div>
               ):(
+                <>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div>
                     <span style={{fontSize:14,fontWeight:600,color:T.text}}>{item.name}</span>
                     {item.classificationLabel&&<span style={{fontSize:10,color:T.accent,display:"block",marginTop:2}}>{item.classificationLabel}</span>}
                     <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4}}>
-                      <span style={{fontSize:18,fontWeight:700,color:getStockColor(item)}}>{item.currentStock}</span>
-                      <span style={{fontSize:12,color:T.textMut}}>{item.unit}</span>
+                      <span style={{fontSize:18,fontWeight:700,color:getStockColor(item)}}>{item.untaggedRemaining!=null?item.untaggedRemaining:item.currentStock}</span>
+                      <span style={{fontSize:12,color:T.textMut}}>{item.unit} available</span>
                       {item.currentStock<0&&<Badge variant="danger" style={{fontSize:9}}>NEGATIVE</Badge>}
                       {item.minStockAlert>0&&item.currentStock<item.minStockAlert&&item.currentStock>=0&&<Badge variant="danger" style={{fontSize:9}}>LOW</Badge>}
                     </div>
+                    <span style={{fontSize:10,color:T.textMut,display:"block",marginTop:2}}>Ledger: {item.currentStock}{item.unit}</span>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:4}}>
+                    {isAdmin&&onAdjust&&<button title="Add adjustment" onClick={e=>{e.stopPropagation();setAdjustItem(item);setAdjType("addition");setAdjQty("");setAdjNotes("")}} style={{background:"none",border:`1px solid ${T.border}`,cursor:"pointer",padding:"4px 8px",borderRadius:T.radSm,display:"flex",alignItems:"center",gap:4,color:T.textSec,fontSize:11}}>
+                      <Icon name="plus" size={12} color={T.textSec}/> Adjust
+                    </button>}
                     {isAdmin&&<button onClick={e=>{e.stopPropagation();setEditId(item.id);setEditData({name:item.name,unit:item.unit,minStockAlert:item.minStockAlert||"",abbreviation:item.abbreviation||"",equivalentItems:Array.isArray(item.equivalentItems)?item.equivalentItems:[]})}} style={{background:"none",border:"none",cursor:"pointer",padding:6}}>
                       <Icon name="edit" size={15} color={T.textSec}/>
                     </button>}
                     <Icon name="chevron" size={16} color={T.textMut}/>
                   </div>
                 </div>
+                {Array.isArray(item.classificationBreakdown)&&item.classificationBreakdown.length>0&&(
+                  (()=>{
+                    const bd=item.classificationBreakdown;
+                    const expanded=!!expandedBreakdown[item.id];
+                    const visible=expanded||bd.length<=3?bd:bd.slice(0,3);
+                    return (
+                      <div onClick={e=>e.stopPropagation()} style={{marginTop:8,paddingTop:8,borderTop:`1px dashed ${T.border}`,display:"flex",flexDirection:"column",gap:2}}>
+                        {visible.map((c,ci)=>{
+                          const label=[c.roastDegreeLabel,c.grindSizeLabel].filter(Boolean).join(" / ")||"Unclassified";
+                          return (<div key={ci} style={{display:"flex",justifyContent:"space-between",fontSize:11,color:T.textSec,fontFamily:T.mono}}>
+                            <span>└ {label}</span>
+                            <span>{Math.round(c.remaining*100)/100} {item.unit}</span>
+                          </div>);
+                        })}
+                        {bd.length>3&&<button onClick={e=>{e.stopPropagation();setExpandedBreakdown(p=>({...p,[item.id]:!expanded}))}} style={{background:"none",border:"none",color:T.accent,fontSize:10,cursor:"pointer",textAlign:"left",padding:"2px 0"}}>{expanded?"Show less":`Show ${bd.length-3} more`}</button>}
+                      </div>
+                    );
+                  })()
+                )}
+                </>
               )}
             </div>
           ))
         }
       </div>
       </>}
+      {adjustItem&&(
+        <div onClick={()=>{if(!adjSaving)setAdjustItem(null)}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:9999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.card,borderRadius:T.rad,padding:18,border:`1px solid ${T.border}`,width:"100%",maxWidth:420,display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <h3 style={{fontSize:15,fontWeight:600,color:T.text}}>Adjust: {adjustItem.name}</h3>
+              <button onClick={()=>{if(!adjSaving)setAdjustItem(null)}} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><Icon name="x" size={16} color={T.textMut}/></button>
+            </div>
+            <Field label="Adjustment Type">
+              <div style={{display:"flex",gap:8}}>
+                <Chip label="Addition (+)" active={adjType==="addition"} onClick={()=>setAdjType("addition")}/>
+                <Chip label="Reduction (-)" active={adjType==="reduction"} onClick={()=>setAdjType("reduction")}/>
+              </div>
+            </Field>
+            <Field label="Quantity">
+              <Input value={adjQty} onChange={v=>{const n=parseFloat(v);setAdjQty(n<0?"0":v)}} type="number" min="0" placeholder="Enter positive quantity"/>
+            </Field>
+            <Field label="Notes (optional)"><Input value={adjNotes} onChange={v=>setAdjNotes(v)} placeholder="Reason for adjustment"/></Field>
+            <div style={{display:"flex",gap:8}}>
+              <Btn variant="secondary" small onClick={()=>setAdjustItem(null)} disabled={adjSaving} style={{flex:1}}>Cancel</Btn>
+              <Btn small disabled={adjSaving||!adjQty||parseFloat(adjQty)<=0} onClick={async()=>{
+                const n=parseFloat(adjQty);if(isNaN(n)||n<=0){addToast?.("Quantity must be greater than 0","error");return;}
+                setAdjSaving(true);
+                try{await onAdjust({itemId:adjustItem.id,adjustmentType:adjType,quantity:n,notes:adjNotes});setAdjustItem(null)}catch{}
+                setAdjSaving(false);
+              }} style={{flex:1}}>{adjSaving?"Saving...":"Save"}</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -7479,16 +7633,20 @@ function CreateEditBlendForm({ blend, customers, inventoryItems, inventoryCatego
   const [customer, setCustomer] = useState(blend?.customer || "General");
   const [description, setDescription] = useState(blend?.description || "");
   const [components, setComponents] = useState(() => {
-    if (Array.isArray(blend?.components) && blend.components.length > 0) return blend.components.map(c => ({...c, percentage: String(c.percentage)}));
-    return [{ category: "Roasted Beans", itemId: "", itemName: "", percentage: "" }];
+    if (Array.isArray(blend?.components) && blend.components.length > 0) return blend.components.map(c => ({...c, percentage: String(c.percentage), roastDegreeId: c.roastDegreeId || "", roastDegreeLabel: c.roastDegreeLabel || "", grindSizeId: c.grindSizeId || "", grindSizeLabel: c.grindSizeLabel || ""}));
+    return [{ category: "Roasted Beans", itemId: "", itemName: "", percentage: "", roastDegreeId: "", roastDegreeLabel: "", grindSizeId: "", grindSizeLabel: "" }];
   });
+  const [classifications, setClassifications] = useState({ roast_degree: [], grind_size: [] });
+  useEffect(() => {
+    API.get("getClassifications").then(d => { if (d && !d.error) setClassifications(d); }).catch(()=>{});
+  }, []);
 
-  const allowedCats = ["Roasted Beans", "Others"];
+  const allowedCats = ["Roasted Beans", "R&G Coffee (excluding Chicory)", "Instant Coffee Mix", "Others"];
   const itemsForCategory = (cat) => (inventoryItems || []).filter(it => it.isActive && it.category === cat);
 
   const updateRow = (i, patch) => setComponents(prev => prev.map((c, idx) => idx === i ? { ...c, ...patch } : c));
   const removeRow = (i) => setComponents(prev => prev.filter((_, idx) => idx !== i));
-  const addRow = () => setComponents(prev => [...prev, { category: "Roasted Beans", itemId: "", itemName: "", percentage: "" }]);
+  const addRow = () => setComponents(prev => [...prev, { category: "Roasted Beans", itemId: "", itemName: "", percentage: "", roastDegreeId: "", roastDegreeLabel: "", grindSizeId: "", grindSizeLabel: "" }]);
 
   const total = components.reduce((s, c) => s + (parseFloat(c.percentage) || 0), 0);
   const valid = name.trim() && Math.abs(total - 100) < 0.001 && components.every(c => (parseFloat(c.percentage) || 0) > 0);
@@ -7499,6 +7657,10 @@ function CreateEditBlendForm({ blend, customers, inventoryItems, inventoryCatego
       itemId: c.itemId || "",
       itemName: c.itemName || "",
       percentage: parseFloat(c.percentage) || 0,
+      roastDegreeId: c.roastDegreeId || "",
+      roastDegreeLabel: c.roastDegreeLabel || "",
+      grindSizeId: c.grindSizeId || "",
+      grindSizeLabel: c.grindSizeLabel || "",
     }));
     onSave({ name: name.trim(), customer, description, components: cleaned });
   };
@@ -7548,6 +7710,24 @@ function CreateEditBlendForm({ blend, customers, inventoryItems, inventoryCatego
                       style={{width:70,padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:13,outline:"none"}}/>
                     <span style={{fontSize:13,color:T.textMut}}>%</span>
                   </div>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                  <select value={c.roastDegreeId||""} onChange={e=>{
+                      const opt = (classifications.roast_degree||[]).find(x => x.id === e.target.value);
+                      updateRow(i, { roastDegreeId: e.target.value, roastDegreeLabel: opt ? opt.name : "" });
+                    }}
+                    style={{padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:12}}>
+                    <option value="">— Any Roast —</option>
+                    {(classifications.roast_degree||[]).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
+                  <select value={c.grindSizeId||""} onChange={e=>{
+                      const opt = (classifications.grind_size||[]).find(x => x.id === e.target.value);
+                      updateRow(i, { grindSizeId: e.target.value, grindSizeLabel: opt ? opt.name : "" });
+                    }}
+                    style={{padding:"8px 10px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:12}}>
+                    <option value="">— Any Grind —</option>
+                    {(classifications.grind_size||[]).map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                  </select>
                 </div>
               </div>
             );

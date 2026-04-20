@@ -51,7 +51,7 @@ var HEADERS = {
   ArchivedOrderChecklists: ["id", "order_id", "checklist_id", "status", "completed_at", "completed_by", "work_date", "archive_id"],
   ArchivedResponses: ["archive_id", "order_id", "order_name", "customer", "checklist_name", "person", "date", "question", "response", "remark", "submitted_at"],
   ArchivesMeta: ["id", "date_range_start", "date_range_end", "orders_count", "created_at", "created_by", "order_ids"],
-  UntaggedChecklists: ["id", "checklist_id", "checklist_name", "person", "date", "submitted_at", "tagged_order_id", "responses", "remarks", "submitted_by_user_id", "total_quantity", "tagged_quantity", "allocations", "auto_id", "is_deleted"],
+  UntaggedChecklists: ["id", "checklist_id", "checklist_name", "person", "date", "submitted_at", "tagged_order_id", "responses", "remarks", "submitted_by_user_id", "total_quantity", "tagged_quantity", "allocations", "auto_id", "is_deleted", "roast_degree_id", "grind_size_id"],
   InventoryItems: ["id", "category", "name", "unit", "opening_stock", "current_stock", "min_stock_alert", "created_at", "is_active", "abbreviation", "equivalent_items", "classification_id"],
   InventoryLedger: ["id", "item_id", "item_name", "category", "date", "type", "quantity", "balance_after", "reference_type", "reference_id", "notes", "done_by", "created_at", "question_index", "classification_id"],
   InventoryCategories: ["id", "name"],
@@ -800,6 +800,7 @@ function doGet(e) {
       case "response-chain":   return jsonResponse(handleGetResponseChain(e.parameter));
       case "getOrderStageTemplates": return jsonResponse(getOrderStageTemplatesConfig());
       case "getInventoryReconciliation": var eIRg = requireAdmin(user); if (eIRg) return jsonResponse(eIRg); return jsonResponse(handleGetInventoryReconciliation());
+      case "getClassificationFieldMapping": var eCFM = requireAdmin(user); if (eCFM) return jsonResponse(eCFM); return jsonResponse(handleGetClassificationFieldMapping());
       default:                  return jsonResponse({ error: "Unknown action: " + action });
     }
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -853,6 +854,7 @@ function doPost(e) {
       case "deleteDraft":       return jsonResponse(handleDeleteDraft(body, user));
       case "createAllocation":  return jsonResponse(handleCreateAllocation(body, user));
       case "saveOrderTypeRequirements": var eOTR = requireAdmin(user); if (eOTR) return jsonResponse(eOTR); return jsonResponse(handleSaveOrderTypeRequirements(body, user));
+      case "saveClassificationFieldMapping": var eSCM = requireAdmin(user); if (eSCM) return jsonResponse(eSCM); return jsonResponse(handleSaveClassificationFieldMapping(body, user));
       case "saveOrderStageTemplates": var eOST = requireAdmin(user); if (eOST) return jsonResponse(eOST); return jsonResponse(handleSaveOrderStageTemplates(body, user));
       case "tagChecklistToStage": return jsonResponse(handleTagChecklistToStage(body, user));
       case "untagChecklistFromStage": return jsonResponse(handleUntagChecklistFromStage(body, user));
@@ -2044,6 +2046,25 @@ function buildRoastAutoId(processed, dateStr) {
 
 // ─── Submit Checklist & Responses ──────────────────────────────
 
+// Validates that no number/text_number response is negative. Returns error string or null.
+function validateNoNegativeNumberResponses(ck, responses) {
+  if (!ck || !Array.isArray(ck.questions) || !Array.isArray(responses)) return null;
+  for (var i = 0; i < responses.length; i++) {
+    var r = responses[i] || {};
+    var qText = r.questionText || "";
+    var q = null;
+    for (var qi = 0; qi < ck.questions.length; qi++) {
+      if (ck.questions[qi].text === qText) { q = ck.questions[qi]; break; }
+    }
+    if (!q) continue;
+    if (q.type !== "number" && q.type !== "text_number") continue;
+    if (r.response === "" || r.response === null || r.response === undefined) continue;
+    var parsed = parseFloat(r.response);
+    if (!isNaN(parsed) && parsed < 0) return "Field '" + qText + "' cannot be negative";
+  }
+  return null;
+}
+
 function handleSubmitChecklist(body, user) {
   ensureSheetHasAllColumns(SHEETS.ORDER_CHECKLISTS);
   var ocId = body.id;
@@ -2062,6 +2083,8 @@ function handleSubmitChecklist(body, user) {
   // Look up related data
   var ck = lookupChecklist(oc.checklist_id);
   if (!ck) return { error: "Checklist template not found" };
+  var negErr = validateNoNegativeNumberResponses(ck, responses);
+  if (negErr) return { error: negErr };
   var order = lookupOrder(oc.order_id);
   var customerLabel = order ? lookupCustomerLabel(order.customer_id) : "";
   var orderTypeLabel = order ? lookupOrderTypeLabel(order.order_type) : "";
@@ -2579,6 +2602,10 @@ function handleGetUntagged() {
       totalQuantity: totalQ, taggedQuantity: allocatedFromQA, remainingQuantity: totalQ - allocatedFromQA,
       allocations: safeParseJSON(r.allocations, []),
       autoId: r.auto_id || "",
+      roastDegreeId: String(r.roast_degree_id || ""),
+      roastDegreeLabel: lookupClassificationLabel(r.roast_degree_id),
+      grindSizeId: String(r.grind_size_id || ""),
+      grindSizeLabel: lookupClassificationLabel(r.grind_size_id),
     };
   }).filter(function(entry) {
     // Visible while remaining > 0, OR if no tracking at all and untagged (legacy rows without total_quantity)
@@ -2614,6 +2641,10 @@ function handleGetUntaggedResponse(params) {
     totalQuantity: totalQ, taggedQuantity: allocatedFromQA, remainingQuantity: totalQ - allocatedFromQA,
     allocations: safeParseJSON(r.allocations, []),
     autoId: r.auto_id || "",
+    roastDegreeId: String(r.roast_degree_id || ""),
+    roastDegreeLabel: lookupClassificationLabel(r.roast_degree_id),
+    grindSizeId: String(r.grind_size_id || ""),
+    grindSizeLabel: lookupClassificationLabel(r.grind_size_id),
   };
 }
 
@@ -2628,6 +2659,8 @@ function handleSubmitUntagged(body, user) {
   var person = body.person || "";
   var date = body.date || "";
   var responses = body.responses || [];
+  var utNegErr = validateNoNegativeNumberResponses(ck, responses);
+  if (utNegErr) return { error: utNegErr };
   var remarks = body.remarks || {};
   var orderId = body.orderId || ""; // optional tag-to-order
   var responsesMap = responsesArrayToMap(responses);
@@ -2667,6 +2700,7 @@ function handleSubmitUntagged(body, user) {
     }
   }
 
+  var classIds = resolveClassificationIdsForSubmission(checklistId, responses, ck);
   var obj = {
     id: id, checklist_id: checklistId, checklist_name: ck.name,
     person: person, date: date, submitted_at: now,
@@ -2675,6 +2709,8 @@ function handleSubmitUntagged(body, user) {
     total_quantity: totalQuantity, tagged_quantity: orderId ? totalQuantity : 0,
     allocations: orderId ? JSON.stringify([{orderId: orderId, quantity: totalQuantity}]) : "[]",
     auto_id: autoId || "",
+    roast_degree_id: classIds.roast_degree_id || "",
+    grind_size_id: classIds.grind_size_id || "",
   };
   appendToSheet(SHEETS.UNTAGGED_CHECKLISTS, obj);
 
@@ -3198,7 +3234,22 @@ function handleCreateInventoryCategory(body, user) {
 
 function handleGetInventoryItems() {
   ensureSheetHasAllColumns(SHEETS.INVENTORY_ITEMS);
+  ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
+  var breakdown = buildUntaggedRemainingBreakdown();
   return getRows(SHEETS.INVENTORY_ITEMS).map(function(r) {
+    var itemBreakdown = breakdown.byItem[r.id] || { remaining: 0, entries: [] };
+    // Group entries by (roastDegreeLabel | grindSizeLabel) combo
+    var combos = {};
+    for (var e = 0; e < itemBreakdown.entries.length; e++) {
+      var ent = itemBreakdown.entries[e];
+      var rLabel = ent.roastDegreeLabel || "";
+      var gLabel = ent.grindSizeLabel || "";
+      var key = rLabel + "||" + gLabel;
+      if (!combos[key]) combos[key] = { roastDegreeLabel: rLabel, grindSizeLabel: gLabel, remaining: 0 };
+      combos[key].remaining += ent.remaining;
+    }
+    var comboList = [];
+    for (var ck in combos) if (combos[ck].remaining > 0) comboList.push(combos[ck]);
     return {
       id: r.id, category: r.category, name: r.name, unit: r.unit || "kg",
       openingStock: parseFloat(r.opening_stock) || 0,
@@ -3209,13 +3260,15 @@ function handleGetInventoryItems() {
       classificationLabel: lookupClassificationLabel(r.classification_id),
       abbreviation: String(r.abbreviation || "").toUpperCase(),
       equivalentItems: safeParseJSON(r.equivalent_items, []),
+      untaggedRemaining: Math.round(itemBreakdown.remaining * 100) / 100,
+      classificationBreakdown: comboList,
     };
   });
 }
 
 function validateAbbreviation(ab) {
   var s = String(ab || "").toUpperCase();
-  if (!/^[A-Z0-9]{2,6}$/.test(s)) return null;
+  if (!/^[A-Z0-9]{2,15}$/.test(s)) return null;
   return s;
 }
 
@@ -3224,7 +3277,7 @@ function handleCreateInventoryItem(body, user) {
   var id = body.id || ("inv_" + nextId());
   var openingStock = parseFloat(body.openingStock) || 0;
   var ab = validateAbbreviation(body.abbreviation);
-  if (!ab) return { error: "Abbreviation is required (2-6 uppercase letters/digits)" };
+  if (!ab) return { error: "Abbreviation is required (2-15 uppercase letters/digits)" };
   var abDup = checkAbbreviationUniqueness(ab, body.category, "");
   if (abDup) return { error: abDup };
   var obj = {
@@ -3268,7 +3321,7 @@ function handleUpdateInventoryItem(body, user) {
   if (body.isActive !== undefined) item.is_active = body.isActive ? "true" : "false";
   if (body.abbreviation !== undefined) {
     var ab2 = validateAbbreviation(body.abbreviation);
-    if (!ab2) return { error: "Abbreviation must be 2-6 uppercase letters/digits" };
+    if (!ab2) return { error: "Abbreviation must be 2-15 uppercase letters/digits" };
     var abDup2 = checkAbbreviationUniqueness(ab2, item.category, id);
     if (abDup2) return { error: abDup2 };
     item.abbreviation = ab2;
@@ -3379,11 +3432,8 @@ function handleAddInventoryAdjustment(body, user) {
   if (!item) return { error: "Item not found" };
 
   var qty = parseFloat(body.quantity);
-  if (isNaN(qty) || qty === 0) return { error: "Quantity must be non-zero" };
+  if (isNaN(qty) || qty <= 0) return { error: "Quantity must be greater than 0" };
   var adjType = body.adjustmentType === "reduction" ? "OUT" : "IN";
-  // IN (addition) must be strictly positive. OUT (reduction) may be negative — a negative
-  // reduction is a manual correction that restores stock (e.g. reversing an over-deduction).
-  if (adjType === "IN" && qty <= 0) return { error: "Addition quantity must be positive" };
   var currentStock = parseFloat(item.current_stock) || 0;
   var newStock = adjType === "IN" ? currentStock + qty : currentStock - qty;
 
@@ -3430,17 +3480,100 @@ function lookupClassificationLabel(classificationId) {
   return "";
 }
 
+// Walks UntaggedChecklists once and builds:
+//   byItem:     { itemId: { remaining: Number, entries: [ {autoId, remaining, roastDegreeId, roastDegreeLabel, grindSizeId, grindSizeLabel} ] } }
+//   byCategory: { greenBeans: Number, roastedBeans: Number, packedGoods: Number }
+// Matching logic mirrors handleGetReconciliationReport so the dashboard and reconciliation report always agree.
+function buildUntaggedRemainingBreakdown() {
+  var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var byItem = {};
+  var byCategory = { greenBeans: 0, roastedBeans: 0, packedGoods: 0 };
+  for (var u = 0; u < utRows.length; u++) {
+    var ut = utRows[u];
+    if (isDeleted(ut)) continue;
+    var utTotal = parseFloat(ut.total_quantity) || 0;
+    if (utTotal <= 0) continue;
+    var utAlloc = ut.auto_id ? getAllocatedQuantityForAutoId(ut.auto_id) : 0;
+    var rem = Math.max(0, utTotal - utAlloc);
+    if (rem <= 0) continue;
+
+    var ckId = String(ut.checklist_id || "");
+    if (ckId === "ck_green_beans") byCategory.greenBeans += rem;
+    else if (ckId === "ck_roasted_beans") byCategory.roastedBeans += rem;
+    else if (ckId === "ck_grinding") byCategory.packedGoods += rem;
+
+    var responses = safeParseJSON(ut.responses, []);
+    var matchedItemId = "";
+    if (ckId === "ck_green_beans") {
+      for (var rr = 0; rr < responses.length; rr++) {
+        if (responses[rr].questionText === "Type of Beans" || responses[rr].questionText === "Type of Bean") {
+          matchedItemId = responses[rr].response || ""; break;
+        }
+      }
+    } else if (ckId === "ck_roasted_beans") {
+      var beanRef = "";
+      for (var rr2 = 0; rr2 < responses.length; rr2++) {
+        if (responses[rr2].questionText === "Type of Beans" || responses[rr2].questionText === "Type of Bean") {
+          beanRef = responses[rr2].response || ""; break;
+        }
+      }
+      if (beanRef) {
+        var rbResolved = findInventoryItemForCategory(beanRef, "Roasted Beans");
+        if (rbResolved && rbResolved.item) matchedItemId = rbResolved.item.id;
+      }
+    } else if (ckId === "ck_grinding") {
+      var roastId = "";
+      for (var rr3 = 0; rr3 < responses.length; rr3++) {
+        if (responses[rr3].questionText === "Roast ID") { roastId = responses[rr3].response || ""; break; }
+      }
+      if (roastId) {
+        var roastCk = lookupChecklist("ck_roasted_beans");
+        if (roastCk) {
+          var roastSub = findSubmissionByAutoId(roastId, roastCk);
+          if (roastSub && roastSub.responses) {
+            var grBeanRef = "";
+            for (var gqi = 0; gqi < roastCk.questions.length; gqi++) {
+              if (roastCk.questions[gqi].text === "Type of Beans" || roastCk.questions[gqi].text === "Type of Bean") {
+                grBeanRef = roastSub.responses[gqi] || roastSub.responses[String(gqi)] || ""; break;
+              }
+            }
+            if (grBeanRef) {
+              var pkResolved = findInventoryItemForCategory(grBeanRef, "Packing Items");
+              if (pkResolved && pkResolved.item) matchedItemId = pkResolved.item.id;
+            }
+          }
+        }
+      }
+    }
+
+    if (!matchedItemId) continue;
+    if (!byItem[matchedItemId]) byItem[matchedItemId] = { remaining: 0, entries: [] };
+    byItem[matchedItemId].remaining += rem;
+    byItem[matchedItemId].entries.push({
+      autoId: ut.auto_id || "",
+      remaining: rem,
+      roastDegreeId: String(ut.roast_degree_id || ""),
+      roastDegreeLabel: lookupClassificationLabel(ut.roast_degree_id),
+      grindSizeId: String(ut.grind_size_id || ""),
+      grindSizeLabel: lookupClassificationLabel(ut.grind_size_id),
+    });
+  }
+  return { byItem: byItem, byCategory: byCategory };
+}
+
 function handleGetInventorySummary() {
   var items = getRows(SHEETS.INVENTORY_ITEMS);
-  var summary = { greenBeans: 0, roastedBeans: 0, packedGoods: 0, lowStockCount: 0 };
+  var breakdown = buildUntaggedRemainingBreakdown();
+  var summary = {
+    greenBeans: breakdown.byCategory.greenBeans,
+    roastedBeans: breakdown.byCategory.roastedBeans,
+    packedGoods: breakdown.byCategory.packedGoods,
+    lowStockCount: 0,
+  };
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
     if (item.is_active === "false" || item.is_active === false) continue;
     var stock = parseFloat(item.current_stock) || 0;
-    var cat = String(item.category || "").trim().toLowerCase();
-    if (cat === "green beans") summary.greenBeans += stock;
-    else if (cat === "roasted beans") summary.roastedBeans += stock;
-    else if (cat === "packing items") summary.packedGoods += stock;
     var minAlert = parseFloat(item.min_stock_alert) || 0;
     if (minAlert > 0 && stock < minAlert) summary.lowStockCount++;
   }
@@ -5871,6 +6004,86 @@ function handleSaveOrderTypeRequirements(body, user) {
   return { success: true, requirements: requirements };
 }
 
+// ─── Classification Field Mapping Config ─────────────────────
+// Stores which checklist field captures which classification type (roast_degree, grind_size).
+// Shape: { roast_degree: { checklistId, fieldIndex }, grind_size: { checklistId, fieldIndex } }
+
+function getClassificationFieldMappingConfig() {
+  var rows = getRows(SHEETS.CONFIG);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].key) === "classification_field_mapping") {
+      return safeParseJSON(rows[i].value, {});
+    }
+  }
+  return {};
+}
+
+function handleGetClassificationFieldMapping() {
+  return getClassificationFieldMappingConfig();
+}
+
+function handleSaveClassificationFieldMapping(body, user) {
+  var mapping = body.mapping || {};
+  var sheet = getSheet(SHEETS.CONFIG);
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === "classification_field_mapping") {
+      sheet.getRange(i + 1, 2).setValue(JSON.stringify(mapping));
+      invalidateCache(SHEETS.CONFIG);
+      writeAuditLog(user, "update", "Config", "classification_field_mapping", "Updated classification field mapping");
+      return { success: true, mapping: mapping };
+    }
+  }
+  sheet.appendRow(["classification_field_mapping", JSON.stringify(mapping)]);
+  invalidateCache(SHEETS.CONFIG);
+  writeAuditLog(user, "create", "Config", "classification_field_mapping", "Created classification field mapping");
+  return { success: true, mapping: mapping };
+}
+
+// Given a freshly-saved untagged/checklist submission, resolve the classification ids
+// (roast_degree_id, grind_size_id) from the configured field mapping. Also inherits
+// roast_degree_id from the source roast entry when this is a ck_grinding submission.
+// Returns { roast_degree_id: string, grind_size_id: string }
+function resolveClassificationIdsForSubmission(checklistId, responses, ck) {
+  var result = { roast_degree_id: "", grind_size_id: "" };
+  var mapping = getClassificationFieldMappingConfig();
+  function readFieldByIndex(idx) {
+    if (idx === undefined || idx === null || idx === "") return "";
+    var i = parseInt(idx, 10);
+    if (isNaN(i) || i < 0) return "";
+    // responses from handleSubmitUntagged/Checklist are arrays of { questionText, response }
+    if (Array.isArray(responses) && responses[i]) {
+      var v = responses[i].response;
+      return (v === null || v === undefined) ? "" : String(v);
+    }
+    return "";
+  }
+  if (mapping.roast_degree && String(mapping.roast_degree.checklistId) === String(checklistId)) {
+    result.roast_degree_id = readFieldByIndex(mapping.roast_degree.fieldIndex);
+  }
+  if (mapping.grind_size && String(mapping.grind_size.checklistId) === String(checklistId)) {
+    result.grind_size_id = readFieldByIndex(mapping.grind_size.fieldIndex);
+  }
+  // For ck_grinding: if roast_degree_id is not set from mapping, inherit from source RB entry via Roast ID
+  if (checklistId === "ck_grinding" && !result.roast_degree_id && Array.isArray(responses)) {
+    var roastId = "";
+    for (var r = 0; r < responses.length; r++) {
+      if (responses[r] && responses[r].questionText === "Roast ID") { roastId = String(responses[r].response || ""); break; }
+    }
+    if (roastId) {
+      var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+      for (var u = 0; u < utRows.length; u++) {
+        if (isDeleted(utRows[u])) continue;
+        if (String(utRows[u].auto_id) === roastId && String(utRows[u].checklist_id) === "ck_roasted_beans") {
+          result.roast_degree_id = String(utRows[u].roast_degree_id || "");
+          break;
+        }
+      }
+    }
+  }
+  return result;
+}
+
 // Find all upstream references to an autoId.
 // Searches QuantityAllocations (where source_auto_id === autoId) and Orders.stages.taggedEntries.
 // Returns an array of referencing auto IDs / stage identifiers.
@@ -6058,6 +6271,36 @@ function handleTagChecklistToStage(body, user) {
   var alreadyAllocated = getAllocatedQuantityForAutoId(responseId);
   var remaining = srcTotal - alreadyAllocated;
   if (qty > remaining + 0.0001) return { error: "Insufficient quantity. Only " + remaining + " available from " + responseId };
+
+  // ── Classification match check (blend components may require specific roast/grind) ──
+  if (blendLineIndex !== null && blendLineIndex >= 0 && componentItemId) {
+    var olForCls = safeParseJSON(order.order_lines, []);
+    if (blendLineIndex < olForCls.length) {
+      var comps = Array.isArray(olForCls[blendLineIndex].blendComponents) ? olForCls[blendLineIndex].blendComponents : [];
+      var requiredComp = null;
+      for (var ci = 0; ci < comps.length; ci++) {
+        if (String(comps[ci].itemId) === String(componentItemId)) { requiredComp = comps[ci]; break; }
+      }
+      if (requiredComp && (requiredComp.roastDegreeId || requiredComp.grindSizeId)) {
+        var utRowsCls = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+        var utCls = null;
+        for (var ui3 = 0; ui3 < utRowsCls.length; ui3++) {
+          if (isDeleted(utRowsCls[ui3])) continue;
+          if (String(utRowsCls[ui3].auto_id) === String(responseId)) { utCls = utRowsCls[ui3]; break; }
+        }
+        if (utCls) {
+          if (requiredComp.roastDegreeId && String(utCls.roast_degree_id || "") !== String(requiredComp.roastDegreeId)) {
+            var entryRoastLabel = lookupClassificationLabel(utCls.roast_degree_id) || "Unclassified";
+            return { error: "Roast degree mismatch: blend requires " + (requiredComp.roastDegreeLabel || lookupClassificationLabel(requiredComp.roastDegreeId)) + " but entry is " + entryRoastLabel };
+          }
+          if (requiredComp.grindSizeId && String(utCls.grind_size_id || "") !== String(requiredComp.grindSizeId)) {
+            var entryGrindLabel = lookupClassificationLabel(utCls.grind_size_id) || "Unclassified";
+            return { error: "Grind size mismatch: blend requires " + (requiredComp.grindSizeLabel || lookupClassificationLabel(requiredComp.grindSizeId)) + " but entry is " + entryGrindLabel };
+          }
+        }
+      }
+    }
+  }
 
   createQuantityAllocation(sourceCk.id, responseId, srcTotal, "order_stage", orderId + ":" + stageId, responseId, qty, user.displayName || user.username);
 

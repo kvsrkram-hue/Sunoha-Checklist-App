@@ -501,6 +501,74 @@ run("S18: REDUCE adjustment → OUT item + allocation increase", () => {
   return { pass: errors.length === 0, errors };
 });
 
+// ── SCENARIO 19: Classification field mapping captures roast_degree_id ──
+// Mirrors resolveClassificationIdsForSubmission in google-apps-script.js:
+//   mapping.roast_degree.checklistId === submission.checklistId → read responses[mapping.fieldIndex]
+run("S19: RB QC with roast degree mapped → roast_degree_id captured", () => {
+  const mapping = {
+    roast_degree: { checklistId: "ck_roasted_beans", fieldIndex: 1 },
+    grind_size:   { checklistId: "ck_grinding",     fieldIndex: 3 },
+  };
+  const resolveClassificationIds = (checklistId, responses, map) => {
+    const out = { roast_degree_id: "", grind_size_id: "" };
+    if (map.roast_degree && map.roast_degree.checklistId === checklistId) {
+      const idx = map.roast_degree.fieldIndex;
+      out.roast_degree_id = (responses[idx] && responses[idx].response) || "";
+    }
+    if (map.grind_size && map.grind_size.checklistId === checklistId) {
+      const idx = map.grind_size.fieldIndex;
+      out.grind_size_id = (responses[idx] && responses[idx].response) || "";
+    }
+    return out;
+  };
+  const rbResponses = [
+    { questionIndex: 0, questionText: "Shipment", response: "GB-001" },
+    { questionIndex: 1, questionText: "Roast Degree", response: "rc_dark" },
+    { questionIndex: 2, questionText: "Quantity output", response: "50" },
+  ];
+  const ids = resolveClassificationIds("ck_roasted_beans", rbResponses, mapping);
+  const errors = [];
+  if (ids.roast_degree_id !== "rc_dark") errors.push("Expected roast_degree_id=rc_dark, got " + ids.roast_degree_id);
+  if (ids.grind_size_id !== "") errors.push("Expected grind_size_id empty for RB, got " + ids.grind_size_id);
+  // Empty mapping should produce empty ids
+  const idsEmpty = resolveClassificationIds("ck_roasted_beans", rbResponses, {});
+  if (idsEmpty.roast_degree_id !== "") errors.push("Empty mapping should yield no roast_degree_id, got " + idsEmpty.roast_degree_id);
+  return { pass: errors.length === 0, errors };
+});
+
+// ── SCENARIO 20: Blend component classification matching in handleTagChecklistToStage ──
+// Matches the check inserted in handleTagChecklistToStage:
+//   if requiredComp has roastDegreeId and utCls.roast_degree_id !== it → error
+run("S20: Blend roastDegreeId tag matching — accept match, reject mismatch", () => {
+  const validateTag = (utEntry, requiredComp) => {
+    if (requiredComp.roastDegreeId && String(utEntry.roast_degree_id || "") !== String(requiredComp.roastDegreeId)) {
+      return { error: "Roast degree mismatch: blend requires " + requiredComp.roastDegreeLabel + " but entry is " + (utEntry.roast_degree_label || "Unclassified") };
+    }
+    if (requiredComp.grindSizeId && String(utEntry.grind_size_id || "") !== String(requiredComp.grindSizeId)) {
+      return { error: "Grind size mismatch: blend requires " + requiredComp.grindSizeLabel + " but entry is " + (utEntry.grind_size_label || "Unclassified") };
+    }
+    return { success: true };
+  };
+  const requiredComp = { itemId: "inv_rb", roastDegreeId: "rc_dark", roastDegreeLabel: "Dark Roast" };
+  const matchingEntry = { auto_id: "RB-001", roast_degree_id: "rc_dark", roast_degree_label: "Dark Roast" };
+  const wrongEntry    = { auto_id: "RB-002", roast_degree_id: "rc_light", roast_degree_label: "Light Roast" };
+  const unclassified  = { auto_id: "RB-003", roast_degree_id: "", roast_degree_label: "" };
+
+  const r1 = validateTag(matchingEntry, requiredComp);
+  const r2 = validateTag(wrongEntry, requiredComp);
+  const r3 = validateTag(unclassified, requiredComp);
+  // Component without classification requirement should accept anything
+  const r4 = validateTag(wrongEntry, { itemId: "inv_rb" });
+
+  const errors = [];
+  if (!r1.success) errors.push("Matching degree should be accepted, got error: " + r1.error);
+  if (!r2.error) errors.push("Wrong degree should be rejected");
+  if (r2.error && r2.error.indexOf("Dark Roast") < 0) errors.push("Error should mention required degree, got: " + r2.error);
+  if (!r3.error) errors.push("Unclassified entry should be rejected when roast required");
+  if (!r4.success) errors.push("No classification requirement → any entry accepted, got: " + r4.error);
+  return { pass: errors.length === 0, errors };
+});
+
 console.log("\n═══════════════════════════════════════");
 console.log(`TOTAL: ${totalPass} PASS, ${totalFail} FAIL`);
 console.log(totalFail === 0 ? "ALL PASS" : totalFail + " FAILURES");
