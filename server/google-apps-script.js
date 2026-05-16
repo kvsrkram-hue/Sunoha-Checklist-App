@@ -766,6 +766,12 @@ function appendAuditLog(tabName, entry) {
 function doGet(e) {
   clearRowsCache();
   var action = (e && e.parameter && e.parameter.action) || "";
+
+  // Warmup endpoint — bypasses auth, does nothing but wake the script
+  if (action === "warmup") {
+    return jsonResponse({ warm: true, timestamp: new Date().toISOString() });
+  }
+
   try {
     var token = (e && e.parameter && e.parameter.token) || "";
     var user = validateToken(token);

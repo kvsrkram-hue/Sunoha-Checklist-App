@@ -4,6 +4,15 @@ import * as XLSX from "xlsx";
 // ─── API Helper (Google Apps Script backend) ──────────────────
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzOJoOFNvYtmYFZJkIyJCoaKiH05t9iqhk8bNkdxisI4FLjHzlpoeK09oofLZW2rF0b/exec";
 
+// Silent warmup ping — fires and forgets, ignores errors
+function warmupBackend() {
+  try {
+    fetch(`${APPS_SCRIPT_URL}?action=warmup`).catch(() => {});
+  } catch (e) {
+    // Silent fail — warmup is optional
+  }
+}
+
 // Track in-flight API calls for the loading indicator
 let _apiCallCount = 0;
 let _apiListeners = [];
@@ -943,6 +952,13 @@ export default function App() {
     return () => document.removeEventListener("wheel", handleWheel);
   }, []);
 
+  // Pre-warm backend when user opens the Fill Checklist form
+  useEffect(() => {
+    if (subView === "quickFill") {
+      warmupBackend();
+    }
+  }, [subView]);
+
   // Toast notification state
   const [toasts,setToasts]=useState([]);
   const toastIdRef = useRef(0);
@@ -964,7 +980,7 @@ export default function App() {
     if (toast.retryFn) toast.retryFn();
   }, [dismissToast]);
 
-  const handleLogin = (token, user) => { setAuthToken(token); setCurrentUser(user); };
+  const handleLogin = (token, user) => { setAuthToken(token); setCurrentUser(user); warmupBackend(); };
 
   const handleLogout = async () => {
     try { await API.post("logout"); } catch {}
