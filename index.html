@@ -12,6 +12,20 @@
     <link rel="icon" type="image/svg+xml" href="/icons/icon-192.svg" />
     <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
     <title>Sunoha - Order Checklists</title>
+    <style>
+      /* Hide number input spinner arrows in WebKit browsers (Chrome, Safari, Edge) */
+      input[type="number"]::-webkit-outer-spin-button,
+      input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+
+      /* Hide number input spinner arrows in Firefox */
+      input[type="number"] {
+        -moz-appearance: textfield;
+        appearance: textfield;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
