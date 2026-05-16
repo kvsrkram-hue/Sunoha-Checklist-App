@@ -74,6 +74,33 @@ var _rowsCache = {};
 function clearRowsCache() { _rowsCache = {}; _columnMigrationDone = false; }
 function invalidateCache(sheetName) { delete _rowsCache[sheetName]; }
 
+// ─── Lookup Table Cache (Step 2C) ──────────────────────────────
+// Caches rarely-changing lookup data in memory to avoid repeated sheet reads.
+// Caches are cleared when admin modifies the corresponding data via dedicated
+// invalidation functions. Cache automatically clears on Apps Script cold start.
+var _customersCache = null;
+var _orderTypesCache = null;
+var _checklistsCache = null;
+
+function getCachedCustomers() {
+  if (_customersCache === null) _customersCache = getRows(SHEETS.CUSTOMERS);
+  return _customersCache;
+}
+
+function getCachedOrderTypes() {
+  if (_orderTypesCache === null) _orderTypesCache = getRows(SHEETS.ORDER_TYPES);
+  return _orderTypesCache;
+}
+
+function getCachedChecklists() {
+  if (_checklistsCache === null) _checklistsCache = getRows(SHEETS.CHECKLISTS);
+  return _checklistsCache;
+}
+
+function invalidateCustomersCache() { _customersCache = null; }
+function invalidateOrderTypesCache() { _orderTypesCache = null; }
+function invalidateChecklistsCache() { _checklistsCache = null; }
+
 // ─── Helpers ───────────────────────────────────────────────────
 
 function getSheet(name) {
@@ -622,7 +649,7 @@ function lookupOrder(orderId) {
 }
 
 function lookupCustomerLabel(customerId) {
-  var customers = getRows(SHEETS.CUSTOMERS);
+  var customers = getCachedCustomers();
   for (var i = 0; i < customers.length; i++) {
     if (String(customers[i].id) === String(customerId)) return customers[i].label;
   }
@@ -630,7 +657,7 @@ function lookupCustomerLabel(customerId) {
 }
 
 function lookupOrderTypeLabel(orderTypeId) {
-  var ots = getRows(SHEETS.ORDER_TYPES);
+  var ots = getCachedOrderTypes();
   for (var i = 0; i < ots.length; i++) {
     if (String(ots[i].id) === String(orderTypeId)) return ots[i].label;
   }
@@ -638,7 +665,7 @@ function lookupOrderTypeLabel(orderTypeId) {
 }
 
 function lookupChecklist(checklistId) {
-  var rows = getRows(SHEETS.CHECKLISTS);
+  var rows = getCachedChecklists();
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i].id) === String(checklistId)) {
       var nq = normalizeQuestions(safeParseJSON(rows[i].questions, []));
@@ -1047,13 +1074,14 @@ function handleChangePassword(body, sessionUser) {
 
 // ─── Order Types ───────────────────────────────────────────────
 
-function handleGetOrderTypes() { return getRows(SHEETS.ORDER_TYPES); }
+function handleGetOrderTypes() { return getCachedOrderTypes(); }
 
 function handleCreateOrderType(body, user) {
   var id = body.id || ("ot_" + nextId());
   var obj = { id: id, label: body.label };
   appendToSheet(SHEETS.ORDER_TYPES, obj);
   writeAuditLog(user, "create", "OrderType", id, body.label);
+  invalidateOrderTypesCache();
   return obj;
 }
 
@@ -1066,18 +1094,20 @@ function handleDeleteOrderType(body, user) {
     if (rules[i].order_type_id === id) { var rIdx = findRowIndex(SHEETS.RULES, rules[i].id); if (rIdx > 0) deleteSheetRow(SHEETS.RULES, rIdx); }
   }
   writeAuditLog(user, "delete", "OrderType", id, "");
+  invalidateOrderTypesCache();
   return { success: true };
 }
 
 // ─── Customers ─────────────────────────────────────────────────
 
-function handleGetCustomers() { return getRows(SHEETS.CUSTOMERS); }
+function handleGetCustomers() { return getCachedCustomers(); }
 
 function handleCreateCustomer(body, user) {
   var id = body.id || ("cust_" + nextId());
   var obj = { id: id, label: body.label };
   appendToSheet(SHEETS.CUSTOMERS, obj);
   writeAuditLog(user, "create", "Customer", id, body.label);
+  invalidateCustomersCache();
   return obj;
 }
 
@@ -1090,6 +1120,7 @@ function handleDeleteCustomer(body, user) {
     if (rules[i].customer_id === id) { var rIdx = findRowIndex(SHEETS.RULES, rules[i].id); if (rIdx > 0) deleteSheetRow(SHEETS.RULES, rIdx); }
   }
   writeAuditLog(user, "delete", "Customer", id, "");
+  invalidateCustomersCache();
   return { success: true };
 }
 
@@ -1097,7 +1128,7 @@ function handleDeleteCustomer(body, user) {
 
 function handleGetChecklists() {
   ensureSheetHasAllColumns(SHEETS.CHECKLISTS);
-  return getRows(SHEETS.CHECKLISTS).map(function(r) {
+  return getCachedChecklists().map(function(r) {
     return {
       id: r.id, name: r.name, subtitle: r.subtitle || "", formUrl: r.form_url || "",
       questions: normalizeQuestions(safeParseJSON(r.questions, [])),
@@ -1122,6 +1153,7 @@ function handleCreateChecklist(body, user) {
   appendToSheet(SHEETS.CHECKLISTS, obj);
   getOrCreateResponseSheet(body.name, questions);
   writeAuditLog(user, "create", "Checklist", id, body.name);
+  invalidateChecklistsCache();
   return { id: id, name: body.name, subtitle: body.subtitle || "", formUrl: body.formUrl || "", questions: questions, autoIdConfig: autoIdConfig, canTagTo: canTagTo };
 }
 
@@ -1192,6 +1224,7 @@ function handleUpdateChecklist(body, user) {
   } catch (e) { /* non-fatal */ }
   var result = { id: id, name: existing.name, subtitle: existing.subtitle || "", formUrl: existing.form_url || "", questions: mergedQuestions, autoIdConfig: autoIdConfig, canTagTo: canTagTo, success: true };
   if (refWarning) result.warning = refWarning;
+  invalidateChecklistsCache();
   return result;
 }
 
@@ -1209,6 +1242,7 @@ function handleDeleteChecklist(body, user) {
     }
   }
   writeAuditLog(user, "delete", "Checklist", id, "");
+  invalidateChecklistsCache();
   return { success: true };
 }
 
