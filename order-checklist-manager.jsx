@@ -2417,6 +2417,129 @@ function LinkedDropdown({ entries, value, onChange, checklistName, sourceCheckli
 
 // ─── Quick Fill View (Free-form Checklist) ────────────────────
 
+// ─── Checklist Preview (shown between Submit click and actual API submission) ──
+function ChecklistPreviewView({ ck, date, person, responses, remarks, roastBatches, classifications, onBack, onConfirm, submitting }) {
+  const nq = ck ? normalizeQuestions(ck.questions) : [];
+  const qMap = {};
+  nq.forEach((q, qi) => { qMap[qi] = q; });
+
+  const renderValue = (q, raw) => {
+    if (raw === "" || raw === undefined || raw === null) {
+      return <span style={{color:T.textMut,fontStyle:"italic"}}>—</span>;
+    }
+    if (q.type === "yesno" || q.isApprovalGate) {
+      const v = String(raw).toLowerCase();
+      if (v === "yes" || v === "y" || v === "true") return <Badge variant="success">Yes</Badge>;
+      if (v === "no" || v === "n" || v === "false") return <Badge variant="danger">No</Badge>;
+      return <span style={{color:T.text}}>{String(raw)}</span>;
+    }
+    if (q.type === "date") return <span style={{color:T.text,fontFamily:T.mono}}>{formatDate(raw)}</span>;
+    if (q.type === "number" || q.type === "text_number") {
+      return <span style={{color:T.text,fontFamily:T.mono}}>{String(raw)}{q.idealUnit?` ${q.idealUnit}`:""}</span>;
+    }
+    return <span style={{color:T.text}}>{String(raw)}</span>;
+  };
+
+  return (
+    <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{padding:"14px 16px",background:T.accentBg,border:`1px solid ${T.accentBorder}`,borderRadius:T.rad}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+          <Icon name="clipboard" size={16} color={T.accent}/>
+          <span style={{fontSize:11,color:T.accent,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.5px"}}>Review Before Submit</span>
+        </div>
+        <h2 style={{fontSize:16,fontWeight:600,color:T.text,marginBottom:10}}>{ck?.name || "Checklist"}</h2>
+        <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+          <div>
+            <span style={{fontSize:11,color:T.textMut,display:"block"}}>Date</span>
+            <span style={{fontSize:13,color:T.textSec,fontFamily:T.mono}}>{formatDate(date)}</span>
+          </div>
+          <div>
+            <span style={{fontSize:11,color:T.textMut,display:"block"}}>Person</span>
+            <span style={{fontSize:13,color:T.textSec}}>{person || "—"}</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:T.card,borderRadius:T.rad,border:`1px solid ${T.border}`,overflow:"hidden"}}>
+        {responses.length === 0 ? (
+          <div style={{padding:"16px",fontSize:13,color:T.textMut,textAlign:"center"}}>No responses recorded.</div>
+        ) : responses.map((r, i) => {
+          const q = qMap[r.questionIndex] || { text: r.questionText, type: "text" };
+          const remark = (remarks && remarks[r.questionIndex]) || "";
+          const isEmpty = r.response === "" || r.response === undefined || r.response === null;
+          return (
+            <div key={i} style={{padding:"12px 14px",borderBottom:i<responses.length-1?`1px solid ${T.border}`:"none",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:14}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:12,color:isEmpty?T.textMut:T.textSec,lineHeight:1.4}}>{r.questionText}</div>
+                {remark && (
+                  <div style={{marginTop:6,fontSize:11,color:T.warning,background:T.warningBg,padding:"3px 8px",borderRadius:8,display:"inline-block",border:`1px solid ${T.warningBorder}`}}>
+                    Remark: {remark}
+                  </div>
+                )}
+              </div>
+              <div style={{textAlign:"right",flexShrink:0,fontSize:14,fontWeight:500,maxWidth:"50%",wordBreak:"break-word"}}>
+                {renderValue(q, r.response)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {Array.isArray(roastBatches) && roastBatches.length > 0 && (
+        <div style={{background:T.card,borderRadius:T.rad,border:`1px solid ${T.border}`,padding:14}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.accent,marginBottom:10,display:"flex",alignItems:"center",gap:6}}>
+            <Icon name="layers" size={14} color={T.accent}/> Roast Batches ({roastBatches.length})
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+              <thead>
+                <tr style={{textAlign:"left",color:T.textMut,fontSize:11}}>
+                  <th style={{padding:"6px 8px",fontWeight:500}}>#</th>
+                  <th style={{padding:"6px 8px",fontWeight:500}}>Source</th>
+                  <th style={{padding:"6px 8px",fontWeight:500,textAlign:"right"}}>Input</th>
+                  <th style={{padding:"6px 8px",fontWeight:500,textAlign:"right"}}>Output</th>
+                  <th style={{padding:"6px 8px",fontWeight:500,textAlign:"right"}}>Loss</th>
+                  <th style={{padding:"6px 8px",fontWeight:500}}>Roast / Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {roastBatches.map((b, bi) => {
+                  const inQ = parseFloat(b.inputQty) || 0;
+                  const outQ = parseFloat(b.outputQty) || 0;
+                  const loss = Math.round((inQ - outQ) * 1000) / 1000;
+                  const cls = (classifications && classifications.roast_degree || []).find(c => String(c.id) === String(b.classificationId));
+                  return (
+                    <tr key={bi} style={{borderTop:`1px solid ${T.border}`,color:T.text}}>
+                      <td style={{padding:"8px"}}>{bi+1}</td>
+                      <td style={{padding:"8px",fontFamily:T.mono,fontSize:11,color:T.accent}}>{b.sourceAutoId || "—"}</td>
+                      <td style={{padding:"8px",textAlign:"right",fontFamily:T.mono}}>{inQ || "—"}</td>
+                      <td style={{padding:"8px",textAlign:"right",fontFamily:T.mono}}>{outQ || "—"}</td>
+                      <td style={{padding:"8px",textAlign:"right",fontFamily:T.mono,color:loss>0?T.warning:T.textMut}}>{loss>0?loss:"—"}</td>
+                      <td style={{padding:"8px",fontSize:11,color:T.textSec}}>
+                        {cls && <span style={{display:"inline-block",padding:"1px 6px",background:T.accentBg,color:T.accent,borderRadius:8,marginRight:6,fontSize:10}}>{cls.name}</span>}
+                        {b.reasonForLoss || ""}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:8,marginTop:4}}>
+        <Btn variant="secondary" onClick={onBack} disabled={submitting} style={{flex:1}}>
+          <Icon name="back" size={14} color={T.text}/> Go Back & Edit
+        </Btn>
+        <Btn variant="success" onClick={onConfirm} disabled={submitting} style={{flex:1}}>
+          <Icon name="check" size={16} color={T.success}/> {submitting?"Submitting...":"Confirm & Submit"}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 function QuickFillView({ checklists, orders, customers, currentUser, approvedEntries, inventoryItems, inventoryCategories, onSubmit, onSaveDraft, resumeDraft, allOrders, addToast }) {
   const [selCkId,setSelCkId]=useState(resumeDraft?.checklistId||"");
   const [formData,setFormData]=useState(()=>{
@@ -2436,6 +2559,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
   const [invOutputItemId,setInvOutputItemId]=useState("");
   const [orderId,setOrderId]=useState("");
   const [submitting,setSubmitting]=useState(false);
+  const [pendingPreview,setPendingPreview]=useState(null);
   const [savingDraft,setSavingDraft]=useState(false);
   const [invError,setInvError]=useState({idx:null,message:""});
   const [roastBatches,setRoastBatches]=useState([{sourceAutoId:"",inputQty:"",outputQty:"",reasonForLoss:"",classificationId:""}]);
@@ -2599,8 +2723,19 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
       }
       payload.roast_batches = validBatches;
     }
-    await onSubmit(payload);
+    setPendingPreview({ payload, roastBatches: payload.roast_batches || null });
     setSubmitting(false);
+  };
+
+  const handleConfirmSubmit=async()=>{
+    if(!pendingPreview) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(pendingPreview.payload);
+      setPendingPreview(null);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleSaveDraft=async()=>{
@@ -2623,6 +2758,23 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
     }catch{}
     setSavingDraft(false);
   };
+
+  if (pendingPreview) {
+    return (
+      <ChecklistPreviewView
+        ck={ck}
+        date={pendingPreview.payload.date}
+        person={pendingPreview.payload.person}
+        responses={pendingPreview.payload.responses}
+        remarks={pendingPreview.payload.remarks}
+        roastBatches={pendingPreview.roastBatches}
+        classifications={classifications}
+        onBack={()=>setPendingPreview(null)}
+        onConfirm={handleConfirmSubmit}
+        submitting={submitting}
+      />
+    );
+  }
 
   return (
     <div className="fade-up" style={{display:"flex",flexDirection:"column",gap:20}}>
@@ -4126,6 +4278,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
   const [invItemId,setInvItemId]=useState("");
   const [invOutputItemId,setInvOutputItemId]=useState("");
   const [submitting,setSubmitting]=useState(false);
+  const [pendingPreview,setPendingPreview]=useState(null);
   const [viewingId,setViewingId]=useState(null);
   const [viewData,setViewData]=useState(null);
   const [loadingView,setLoadingView]=useState(false);
@@ -4273,14 +4426,24 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
         }
         return { questionIndex:qi, questionText:q.text, response:resp };
       });
-      await API.post("submitChecklist",{id:item.id,date:formData.date,person:formData.person,responses,remarks:formData.remarks,inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{}});
-      // Optimistic update: move checklist from pending to completed locally
+      const payload = {id:item.id,date:formData.date,person:formData.person,responses,remarks:formData.remarks,inventoryItemId:invItemId,inventoryOutputItemId:invOutputItemId,batchAllocations:formData.batchAllocations||{}};
+      setPendingPreview({ item, ck, payload });
+    } catch(e) { alert("Validation failed: " + e.message); }
+    setSubmitting(false);
+  };
+
+  const handleConfirmSubmit=async()=>{
+    if(!pendingPreview) return;
+    const {item, payload} = pendingPreview;
+    setSubmitting(true);
+    try {
+      await API.post("submitChecklist", payload);
       const now = new Date().toISOString();
       const updatedChecklists = order.checklists.map(c =>
-        c.id === item.id ? { ...c, status:"completed", completedAt:now, completedBy:formData.person, workDate:formData.date } : c
+        c.id === item.id ? { ...c, status:"completed", completedAt:now, completedBy:payload.person, workDate:payload.date } : c
       );
-      const updated = { ...order, checklists: updatedChecklists };
-      onUpdate(updated);
+      onUpdate({ ...order, checklists: updatedChecklists });
+      setPendingPreview(null);
       setExpandedId(null);
     } catch(e) { alert("Failed to submit: " + e.message); }
     setSubmitting(false);
@@ -4503,7 +4666,23 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
                   <Icon name="chevron" size={18} color={T.textMut} style={{transform:isExpanded?"rotate(90deg)":"rotate(0)",transition:"transform .2s"}}/>
                 </div>
               </div>
-              {isExpanded&&<div style={{borderTop:`1px solid ${T.border}`,paddingTop:16}}>
+              {isExpanded && pendingPreview && pendingPreview.item.id === item.id && (
+                <div style={{borderTop:`1px solid ${T.border}`,paddingTop:16}}>
+                  <ChecklistPreviewView
+                    ck={pendingPreview.ck}
+                    date={pendingPreview.payload.date}
+                    person={pendingPreview.payload.person}
+                    responses={pendingPreview.payload.responses}
+                    remarks={pendingPreview.payload.remarks}
+                    roastBatches={null}
+                    classifications={classifications}
+                    onBack={()=>setPendingPreview(null)}
+                    onConfirm={handleConfirmSubmit}
+                    submitting={submitting}
+                  />
+                </div>
+              )}
+              {isExpanded && !(pendingPreview && pendingPreview.item.id === item.id) && <div style={{borderTop:`1px solid ${T.border}`,paddingTop:16}}>
                 {item.checklistId==="ck_grinding"&&Array.isArray(order.orderLines)&&order.orderLines.length>0&&(
                   <div style={{padding:"10px 12px",background:T.accentBg,border:`1px solid ${T.accentBorder}`,borderRadius:T.radSm,marginBottom:12}}>
                     <span style={{fontSize:12,fontWeight:600,color:T.accent,display:"block",marginBottom:6}}>Blend Requirements</span>
