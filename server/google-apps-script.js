@@ -3156,7 +3156,24 @@ function getApprovedEntriesForChecklist(checklistId) {
           for (var ri = 0; ri < remarkIdx.length; ri++) {
             if (remarkIdx[ri] === q && rmkColMap[ri] >= 0) remark = String(data[r][rmkColMap[ri]] || "");
           }
-          var rspVal = qColMap[q] >= 0 ? String(data[r][qColMap[q]] || "") : "";
+          var rspVal = "";
+          if (qColMap[q] >= 0) {
+            var cell = data[r][qColMap[q]];
+            if (cell !== null && cell !== undefined && cell !== "") {
+              if (nq[q] && nq[q].type === "date") {
+                var d = (cell instanceof Date) ? cell : new Date(cell);
+                if (!isNaN(d.getTime())) {
+                  rspVal = Utilities.formatDate(
+                    d, Session.getScriptTimeZone(), "yyyy-MM-dd"
+                  );
+                } else {
+                  rspVal = String(cell);
+                }
+              } else {
+                rspVal = String(cell);
+              }
+            }
+          }
           if (nq[q] && nq[q].type === "inventory_item" && rspVal && rspVal.indexOf("inv_") === 0) {
             rspVal = inventoryItemNameById(rspVal);
           }
