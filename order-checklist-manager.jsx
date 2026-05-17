@@ -939,6 +939,12 @@ export default function App() {
 
   const [view,setView]=useState("orders");
   const [subView,setSubView]=useState(null);
+  // Phase B: "+ Add New" blend flow from NewOrderView. Intent + draft are lifted
+  // to App so that editBlend can route back to NewOrderView with the draft restored
+  // and the newly-created blend auto-selected into the originating line.
+  // Cleared on switchTab and after consumption by NewOrderView.
+  const [blendCreateIntent,setBlendCreateIntent]=useState(null);
+  const [pendingNewOrderDraft,setPendingNewOrderDraft]=useState(null);
   const [checklists,setChecklists]=useState([]);
   const [orderTypes,setOrderTypes]=useState([]);
   const [customers,setCustomers]=useState([]);
@@ -1063,6 +1069,15 @@ export default function App() {
   }, []);
 
   const goBack = () => {
+    // Phase B: if user cancels editBlend while a + Add New flow is in progress,
+    // return to the originating view (NewOrderView) instead of falling back to
+    // BlendsPage. The stashed draft survives so the form re-hydrates.
+    if (subView==="editBlend" && blendCreateIntent && blendCreateIntent.returnTo === "newOrder") {
+      setBlendCreateIntent(null);
+      setSelected(null);
+      setSubView("newOrder");
+      return;
+    }
     if (subView==="editResponses" && detailOrder) {
       setSubView("orderDetail"); setSelected(detailOrder); setDetailOrder(null);
     } else if (subView) {
@@ -1072,7 +1087,7 @@ export default function App() {
     }
   };
 
-  const switchTab = (tab) => { setView(tab); setSubView(null); setSelected(null); setDetailOrder(null); };
+  const switchTab = (tab) => { setView(tab); setSubView(null); setSelected(null); setDetailOrder(null); setBlendCreateIntent(null); setPendingNewOrderDraft(null); };
   const currentView = subView || view;
   const titles = {orders:"Sunoha Checklists",responses:"Responses Log",admin:"Settings",users:"User Management",inventory:"Inventory",inventoryLedger:"Item Ledger",orderDetail:"Order Details",newOrder:"New Order",editChecklist:selected?"Edit Checklist":"New Checklist",editRules:"Assignment Rules",addRule:"New Rule",editRule:"Edit Rule",editResponses:"Edit Responses",quickFill:"Fill Checklist",blends:"Blends",editBlend:selected?"Edit Blend":"New Blend"};
   const isTabView = ["orders","responses","admin","users","inventory","blends"].includes(currentView);
@@ -1154,6 +1169,14 @@ export default function App() {
           }}/>}
 
         {currentView==="newOrder" && <NewOrderView orderTypes={orderTypes} customers={customers} checklists={checklists} currentUser={currentUser} blends={blends} orderStageTemplates={orderStageTemplates}
+          initialDraft={pendingNewOrderDraft}
+          onDraftConsumed={()=>setPendingNewOrderDraft(null)}
+          onAddNewBlend={(lineIndex, draft)=>{
+            setPendingNewOrderDraft(draft);
+            setBlendCreateIntent({ returnTo: "newOrder", lineIndex });
+            setSelected(null);
+            setSubView("editBlend");
+          }}
           onAddCustomer={async(name)=>{
             const optimisticId = "cust_"+Date.now();
             const optimisticCust = {id:optimisticId,label:name};
@@ -1421,16 +1444,33 @@ export default function App() {
         {currentView==="editBlend" && <CreateEditBlendForm blend={selected} customers={customers} inventoryItems={inventoryItems} inventoryCategories={inventoryCategories}
           onSave={async(b)=>{
             try{
+              let saved;
               if(selected){
                 const r=await API.post("updateBlend",{id:selected.id,...b});
                 setBlends(prev=>prev.map(x=>x.id===r.id?r:x));
                 addToast("Blend updated","success");
+                saved = r;
               } else {
                 const r=await API.post("createBlend",b);
                 setBlends(prev=>[...prev,r]);
                 addToast("Blend created","success");
+                saved = r;
               }
-              setSubView(null);setSelected(null);
+              // Phase B: if we arrived here via "+ Add New" from NewOrderView,
+              // stash the new blend id into the draft (one-shot _autoSelectBlend
+              // signal) and return to NewOrderView; otherwise fall back to the
+              // Settings → Blends list as before.
+              if (blendCreateIntent && blendCreateIntent.returnTo === "newOrder" && saved && saved.id) {
+                setPendingNewOrderDraft(prev => prev ? {
+                  ...prev,
+                  _autoSelectBlend: { lineIndex: blendCreateIntent.lineIndex, blendId: saved.id }
+                } : prev);
+                setBlendCreateIntent(null);
+                setSelected(null);
+                setSubView("newOrder");
+              } else {
+                setSubView(null);setSelected(null);
+              }
             }catch(e){addToast(e.message,"error")}
           }}/>}
       </div>
@@ -3212,19 +3252,45 @@ function OrderCard({order,checklists,orderTypes,customers,isAdmin,onClick,onDele
 
 // ─── New Order View ───────────────────────────────────────────
 
-function NewOrderView({orderTypes,customers,checklists,currentUser,blends,orderStageTemplates,onAddCustomer,onCreate}){
-  const [name,setName]=useState("");
-  const [custId,setCustId]=useState(customers[0]?.id||"");
+function NewOrderView({orderTypes,customers,checklists,currentUser,blends,orderStageTemplates,onAddCustomer,onCreate,initialDraft,onDraftConsumed,onAddNewBlend}){
+  // Phase B: lazy initializers re-hydrate from a draft stashed by App when the
+  // user clicked "+ Add New" on a blend selector. If no draft, fall back to the
+  // original defaults so first-time entry is unchanged. Transient UI state
+  // (showNewCust, newCust) is intentionally NOT snapshotted/restored.
+  const [name,setName]=useState(()=>initialDraft?.name ?? "");
+  const [custId,setCustId]=useState(()=>initialDraft?.custId ?? (customers[0]?.id||""));
   const [newCust,setNewCust]=useState("");
-  const [type,setType]=useState(orderTypes[0]?.id||"");
-  const [assignedTo,setAssignedTo]=useState("");
-  const [invoiceSo,setInvoiceSo]=useState("");
-  const [orderTypeDetail,setOrderTypeDetail]=useState("Client Order");
-  const [productType,setProductType]=useState("");
-  const [stages,setStages]=useState([]);
-  const [selCk,setSelCk]=useState([]);
+  const [type,setType]=useState(()=>initialDraft?.type ?? (orderTypes[0]?.id||""));
+  const [assignedTo,setAssignedTo]=useState(()=>initialDraft?.assignedTo ?? "");
+  const [invoiceSo,setInvoiceSo]=useState(()=>initialDraft?.invoiceSo ?? "");
+  const [orderTypeDetail,setOrderTypeDetail]=useState(()=>initialDraft?.orderTypeDetail ?? "Client Order");
+  const [productType,setProductType]=useState(()=>initialDraft?.productType ?? "");
+  const [stages,setStages]=useState(()=>Array.isArray(initialDraft?.stages) ? initialDraft.stages : []);
+  const [selCk,setSelCk]=useState(()=>Array.isArray(initialDraft?.selCk) ? initialDraft.selCk : []);
   const [showNewCust,setShowNewCust]=useState(false);
-  const [orderLines,setOrderLines]=useState([{blendId:"",blend:"",blendComponents:[],quantity:"",deliveryDate:""}]);
+  const [orderLines,setOrderLines]=useState(()=>(Array.isArray(initialDraft?.orderLines) && initialDraft.orderLines.length > 0)
+    ? initialDraft.orderLines
+    : [{blendId:"",blend:"",blendComponents:[],quantity:"",deliveryDate:""}]);
+
+  // Phase B: one-shot consumption of the stashed draft. If the draft carried a
+  // _autoSelectBlend signal (set by App's editBlend onSave when this view was
+  // the return target), apply it to the originating line, then tell App to
+  // clear the draft so a later return to this view starts fresh.
+  useEffect(()=>{
+    if(!initialDraft) return;
+    const sig = initialDraft._autoSelectBlend;
+    if(sig && typeof sig.lineIndex === "number" && sig.blendId){
+      const b = (blends||[]).find(x=>x.id===sig.blendId);
+      if(b){
+        setOrderLines(p=>p.map((l,idx)=>idx===sig.lineIndex
+          ? {...l, blendId:b.id, blend:b.name, blendComponents:b.components||[]}
+          : l));
+        if(typeof onDraftConsumed === "function") onDraftConsumed();
+      }
+    } else {
+      if(typeof onDraftConsumed === "function") onDraftConsumed();
+    }
+  },[initialDraft, blends]);
 
   const customerLabel = customers.find(c=>c.id===custId)?.label || "";
 
@@ -3297,7 +3363,15 @@ function NewOrderView({orderTypes,customers,checklists,currentUser,blends,orderS
                 <span style={{fontSize:12,color:T.textMut,fontFamily:T.mono,flexShrink:0}}>{String(i+1).padStart(2,"0")}</span>
                 <div style={{flex:1}}>
                   <BlendSelector blends={blends} customerLabel={customerLabel} value={line.blendId}
-                    onChange={(b)=>updateLine(i,{blendId:b?.id||"",blend:b?.name||"",blendComponents:b?.components||[]})}/>
+                    onChange={(b)=>updateLine(i,{blendId:b?.id||"",blend:b?.name||"",blendComponents:b?.components||[]})}
+                    onAddNew={typeof onAddNewBlend === "function" ? (()=>{
+                      // Snapshot ONLY the persistent form fields. Transient UI state
+                      // (showNewCust, in-flight newCust input) is intentionally excluded.
+                      onAddNewBlend(i, {
+                        name, custId, type, assignedTo, invoiceSo,
+                        orderTypeDetail, productType, stages, selCk, orderLines,
+                      });
+                    }) : undefined}/>
                 </div>
                 {orderLines.length>1&&<button onClick={()=>removeLine(i)} style={{background:"none",border:"none",cursor:"pointer",padding:4,flexShrink:0}}><Icon name="trash" size={16} color={T.danger}/></button>}
               </div>
@@ -8154,15 +8228,26 @@ function CreateEditBlendForm({ blend, customers, inventoryItems, inventoryCatego
 }
 
 // Order-line blend selector — dropdown filtered by customer
-function BlendSelector({ blends, customerLabel, value, onChange }) {
+function BlendSelector({ blends, customerLabel, value, onChange, onAddNew }) {
   const safe = blends || [];
   const filtered = safe.filter(b => b.isActive !== false && ((b.customer || "General") === "General" || b.customer === customerLabel));
   const selected = filtered.find(b => b.id === value);
+  const canAdd = typeof onAddNew === "function";
   return (
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
-      <SearchableDropdown
-        options={filtered.map(b=>({label:b.name+(b.customer&&b.customer!=="General"?` (${b.customer})`:""),value:b.id}))}
-        value={value||""} onChange={v=>{const b=filtered.find(x=>x.id===v);onChange(b||null)}} placeholder="— Select blend —"/>
+      <div style={{display:"flex",gap:6,alignItems:"stretch"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <SearchableDropdown
+            options={filtered.map(b=>({label:b.name+(b.customer&&b.customer!=="General"?` (${b.customer})`:""),value:b.id}))}
+            value={value||""} onChange={v=>{const b=filtered.find(x=>x.id===v);onChange(b||null)}} placeholder="— Select blend —"/>
+        </div>
+        {canAdd && (
+          <button onClick={onAddNew}
+            style={{padding:"6px 12px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+            + Add New
+          </button>
+        )}
+      </div>
       {selected && (
         <div style={{padding:"8px 10px",background:T.bg,borderRadius:T.radSm,border:`1px solid ${T.border}`}}>
           <p style={{fontSize:11,color:T.textMut}}>{blendComponentSummary(selected.components)}</p>
