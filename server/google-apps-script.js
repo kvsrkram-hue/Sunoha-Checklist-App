@@ -3727,22 +3727,33 @@ function buildUntaggedRemainingBreakdown() {
 }
 
 function handleGetInventorySummary() {
+  // Sum current_stock per category from InventoryItems (ledger-driven running balance).
+  // Replaces the previous behaviour which read remaining quantity from UntaggedChecklists —
+  // that was a workflow metric, not a stock balance, and ignored opening stock + adjustments
+  // and did not reflect roast/grind consumption against current_stock.
+  // Loss / Others / admin-created categories exist on InventoryItems but are intentionally
+  // not surfaced in the four-card summary; they still appear in the per-item inventory tab.
+  // Approval-gating of writes is a separate concern (Step 2) and is NOT addressed here.
   var items = getRows(SHEETS.INVENTORY_ITEMS);
-  var breakdown = buildUntaggedRemainingBreakdown();
-  var summary = {
-    greenBeans: breakdown.byCategory.greenBeans,
-    roastedBeans: breakdown.byCategory.roastedBeans,
-    packedGoods: breakdown.byCategory.packedGoods,
-    lowStockCount: 0,
-  };
+  var totals = {};
+  var lowStockCount = 0;
+
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
     if (item.is_active === "false" || item.is_active === false) continue;
     var stock = parseFloat(item.current_stock) || 0;
     var minAlert = parseFloat(item.min_stock_alert) || 0;
-    if (minAlert > 0 && stock < minAlert) summary.lowStockCount++;
+    if (minAlert > 0 && stock < minAlert) lowStockCount++;
+    var cat = item.category || "Uncategorized";
+    totals[cat] = (totals[cat] || 0) + stock;
   }
-  return summary;
+
+  return {
+    greenBeans:    Math.round((totals["Green Beans"]    || 0) * 100) / 100,
+    roastedBeans:  Math.round((totals["Roasted Beans"]  || 0) * 100) / 100,
+    packedGoods:   Math.round((totals["Packing Items"]  || 0) * 100) / 100,
+    lowStockCount: lowStockCount,
+  };
 }
 
 // Helper: create inventory transaction (used by checklist submissions)
