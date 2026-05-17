@@ -443,8 +443,9 @@ const Toggle = ({ active, onClick, label, sub }) => (
 
 // ─── Question Input Renderer ─────────────────────────────────
 
-function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData, setFormData, approvedEntries, checklists, getFieldValue, orders, customers, inventoryItems, onBatchAllocChange, allQuestions, onInventoryAutoFill, checklistId, classificationFieldMapping, classifications }) {
+function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData, setFormData, approvedEntries, checklists, getFieldValue, orders, customers, inventoryItems, onBatchAllocChange, allQuestions, onInventoryAutoFill, checklistId, classificationFieldMapping, classifications, onCreateInventoryItem }) {
   const [negativeError, setNegativeError] = useState(false);
+  const [addInvItemOpen, setAddInvItemOpen] = useState(false);
   useEffect(() => { if (negativeError) { const t = setTimeout(() => setNegativeError(false), 3500); return () => clearTimeout(t); } }, [negativeError]);
   const isAutoFilled = !!(formData.autoFilled && formData.autoFilled[qi]);
   const autoFilledReadOnly = !!(formData.autoFilledReadOnly && formData.autoFilledReadOnly[qi]);
@@ -597,6 +598,7 @@ function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData
   // Inventory item dropdown
   if(q.type === "inventory_item"){
     const items=(inventoryItems||[]).filter(it=>it.isActive&&(!q.inventoryCategory||it.category===q.inventoryCategory));
+    const canAdd = typeof onCreateInventoryItem === "function" && !!q.inventoryCategory && !(isAutoFilled && autoFilledReadOnly);
     return (
       <div key={qi}>
         <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
@@ -604,10 +606,35 @@ function QuestionInputField({ q, qi, currentVal, idealVal, needsRemark, formData
           <span style={{fontSize:13,color:T.textSec,lineHeight:1.4,flex:1}}>{q.text}</span>
           {isAutoFilled&&<Badge variant="info" style={{fontSize:9}}>Auto-filled from {autoFilledSource||"source"}</Badge>}
         </div>
-        <SearchableDropdown
-          options={items.map(it=>({label:it.name+(it.abbreviation?` (${it.abbreviation})`:""),value:it.id}))}
-          value={currentVal} onChange={v=>setFormData(p=>({...p,responses:{...p.responses,[qi]:v}}))}
-          disabled={isAutoFilled&&autoFilledReadOnly} placeholder="— Select item —"/>
+        <div style={{display:"flex",gap:6,alignItems:"stretch"}}>
+          <div style={{flex:1,minWidth:0}}>
+            <SearchableDropdown
+              options={items.map(it=>({label:it.name+(it.abbreviation?` (${it.abbreviation})`:""),value:it.id}))}
+              value={currentVal} onChange={v=>setFormData(p=>({...p,responses:{...p.responses,[qi]:v}}))}
+              disabled={isAutoFilled&&autoFilledReadOnly} placeholder="— Select item —"/>
+          </div>
+          {canAdd && (
+            <button onClick={()=>setAddInvItemOpen(true)}
+              style={{padding:"6px 12px",borderRadius:T.radSm,background:T.accentBg,border:`1px solid ${T.accentBorder}`,color:T.accent,fontSize:12,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+              + Add New
+            </button>
+          )}
+        </div>
+        {canAdd && (
+          <AddInventoryItemModal
+            isOpen={addInvItemOpen}
+            onClose={()=>setAddInvItemOpen(false)}
+            lockedCategory={q.inventoryCategory}
+            existingItems={inventoryItems}
+            onCreated={async(payload)=>{
+              const newItem = await onCreateInventoryItem(payload);
+              if (newItem && newItem.id) {
+                setFormData(p=>({...p,responses:{...p.responses,[qi]:newItem.id}}));
+              }
+              return newItem;
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -1024,6 +1051,17 @@ export default function App() {
   const refreshBlends = async () => { try { setBlends(await API.get("getBlends")); } catch(e) { addToast("Failed to refresh blends", "error", refreshBlends); } };
   const refreshDrafts = async () => { try { setDrafts(await API.get("getDrafts")); } catch(e) { addToast("Failed to refresh drafts", "error", refreshDrafts); } };
 
+  // Inventory-item create callback usable from in-checklist "+ Add New" modals.
+  // Parallel to InventoryView's onCreateItem but returns the new item so the modal
+  // can resolve and auto-select; on error, throws so the modal surfaces it inline
+  // (rather than firing a global toast).
+  const createInventoryItem = useCallback(async (item) => {
+    const r = await API.post("createInventoryItem", item);
+    setInventoryItems(prev => [...prev, r]);
+    try { const s = await API.get("getInventorySummary"); setInventorySummary(s); } catch {}
+    return r;
+  }, []);
+
   const goBack = () => {
     if (subView==="editResponses" && detailOrder) {
       setSubView("orderDetail"); setSelected(detailOrder); setDetailOrder(null);
@@ -1132,7 +1170,7 @@ export default function App() {
           }}/>}
 
         {currentView==="quickFill" && <QuickFillView checklists={checklists} orders={orders} customers={customers} currentUser={currentUser} approvedEntries={approvedEntries} inventoryItems={inventoryItems} inventoryCategories={inventoryCategories}
-          resumeDraft={resumeDraft} addToast={addToast}
+          resumeDraft={resumeDraft} addToast={addToast} onCreateInventoryItem={createInventoryItem}
           onSaveDraft={async(payload)=>{
             try{
               const r=await API.post("saveDraft",payload);
@@ -1153,7 +1191,7 @@ export default function App() {
             }catch(e){addToast(e.message,"error")}
           }}/>}
 
-        {currentView==="orderDetail" && selected && <OrderDetailView order={selected} checklists={checklists} customers={customers} isAdmin={isAdmin} currentUser={currentUser} approvedEntries={approvedEntries} inventoryItems={inventoryItems} inventoryCategories={inventoryCategories} untaggedChecklists={untaggedChecklists} blends={blends}
+        {currentView==="orderDetail" && selected && <OrderDetailView order={selected} checklists={checklists} customers={customers} isAdmin={isAdmin} currentUser={currentUser} approvedEntries={approvedEntries} inventoryItems={inventoryItems} inventoryCategories={inventoryCategories} untaggedChecklists={untaggedChecklists} blends={blends} onCreateInventoryItem={createInventoryItem}
           onUpdate={updated=>{setOrders(prev=>prev.map(o=>o.id===updated.id?updated:o));setSelected(updated)}}
           onEditOrder={async(data)=>{
             // Optimistic update
@@ -2540,7 +2578,7 @@ function ChecklistPreviewView({ ck, date, person, responses, remarks, roastBatch
   );
 }
 
-function QuickFillView({ checklists, orders, customers, currentUser, approvedEntries, inventoryItems, inventoryCategories, onSubmit, onSaveDraft, resumeDraft, allOrders, addToast }) {
+function QuickFillView({ checklists, orders, customers, currentUser, approvedEntries, inventoryItems, inventoryCategories, onSubmit, onSaveDraft, resumeDraft, allOrders, addToast, onCreateInventoryItem }) {
   const [selCkId,setSelCkId]=useState(resumeDraft?.checklistId||"");
   const [formData,setFormData]=useState(()=>{
     if(resumeDraft){
@@ -2921,6 +2959,7 @@ function QuickFillView({ checklists, orders, customers, currentUser, approvedEnt
                   orders={selCkId==="ck_grinding"?orders:null} customers={customers}
                   inventoryItems={inventoryItems} onBatchAllocChange={onBatchAllocChange} allQuestions={nq}
                   checklistId={selCkId} classificationFieldMapping={classificationFieldMapping} classifications={classifications||{roast_degree:[],grind_size:[]}}
+                  onCreateInventoryItem={onCreateInventoryItem}
                   onInventoryAutoFill={(item)=>{
                     if(!item){setInvItemId("");setInvOutputItemId("");return;}
                     setInvItemId(item.id);
@@ -4272,7 +4311,7 @@ function DeliverConfirmModal({ preview, onConfirm, onCancel, busy }) {
 
 // ─── Order Detail with Checklist Input ─────────────────────────
 
-function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approvedEntries,inventoryItems,inventoryCategories,untaggedChecklists,blends,onUpdate,onEditOrder,onDeleteOrder,onRevertChecklist,onEditResponses,onUpdateStatus,onTagStage,onTagMixedStage,onUntagStage,onDeliver}){
+function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approvedEntries,inventoryItems,inventoryCategories,untaggedChecklists,blends,onUpdate,onEditOrder,onDeleteOrder,onRevertChecklist,onEditResponses,onUpdateStatus,onTagStage,onTagMixedStage,onUntagStage,onDeliver,onCreateInventoryItem}){
   const [expandedId,setExpandedId]=useState(null);
   const [formData,setFormData]=useState({date:"",person:"",responses:{},remarks:{},batchAllocations:{}});
   const [invItemId,setInvItemId]=useState("");
@@ -4804,6 +4843,7 @@ function OrderDetailView({order,checklists,customers,isAdmin,currentUser,approve
                             orders={item.checklistId==="ck_grinding"?null:null} customers={customers}
                             inventoryItems={inventoryItems} onBatchAllocChange={onBatchAllocChange} allQuestions={ckNq}
                             checklistId={item.checklistId} classificationFieldMapping={classificationFieldMapping} classifications={classifications}
+                            onCreateInventoryItem={onCreateInventoryItem}
                             onInventoryAutoFill={(item2)=>{
                               if(!item2){setInvItemId("");setInvOutputItemId("");return;}
                               setInvItemId(item2.id);
@@ -6700,6 +6740,146 @@ function EquivalentItemsEditor({ items, currentItem, value, onChange }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Add Inventory Item Modal (inline "+ Add New" from inventory_item dropdowns) ──
+// Visual pattern mirrors PreviewModal. Category is locked to the source dropdown's filter
+// so users can't accidentally create an item in the wrong category. Backend already enforces
+// abbreviation regex + uniqueness; the client-side dedupe is for instant feedback.
+function AddInventoryItemModal({ isOpen, onClose, lockedCategory, existingItems, onCreated }) {
+  const [name, setName] = useState("");
+  const [abbreviation, setAbbreviation] = useState("");
+  const [unit, setUnit] = useState("kg");
+  const [openingStock, setOpeningStock] = useState("");
+  const [minStockAlert, setMinStockAlert] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  // Reset state every time the modal opens (so reopening after success starts fresh,
+  // and so cancelling then reopening doesn't surface stale errors).
+  useEffect(() => {
+    if (isOpen) {
+      setName(""); setAbbreviation(""); setUnit("kg");
+      setOpeningStock(""); setMinStockAlert("");
+      setSaving(false); setError("");
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const ab = String(abbreviation || "").toUpperCase();
+  const abValid = /^[A-Z0-9]{2,15}$/.test(ab);
+  const abShowsError = abbreviation.length > 0 && !abValid;
+  const canSubmit = name.trim().length > 0 && abValid && !saving;
+
+  const handleSubmit = async () => {
+    setError("");
+    const trimmedName = name.trim();
+
+    // Client-side dedupe within the locked category (active items only).
+    const cat = lockedCategory || "";
+    const activeInCat = (existingItems || []).filter(it => it.isActive && it.category === cat);
+    const nameDup = activeInCat.find(it => String(it.name).trim().toLowerCase() === trimmedName.toLowerCase());
+    if (nameDup) {
+      setError(`An item with this name already exists in ${cat}.`);
+      return;
+    }
+    const abDup = activeInCat.find(it => String(it.abbreviation || "").toUpperCase() === ab);
+    if (abDup) {
+      setError(`Abbreviation already used by ${abDup.name}.`);
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const newItem = await onCreated({
+        name: trimmedName,
+        category: cat,
+        unit: unit || "kg",
+        openingStock: parseFloat(openingStock) || 0,
+        minStockAlert: parseFloat(minStockAlert) || 0,
+        abbreviation: ab,
+      });
+      // onCreated resolves with the hydrated item AND has already updated parent state.
+      // The parent (QuestionInputField caller) handles auto-select via the same callback.
+      if (newItem) onClose();
+    } catch (e) {
+      setError(e && e.message ? e.message : "Failed to create item.");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div onClick={saving ? undefined : onClose}
+      style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:200,background:"rgba(0,0,0,0.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:T.card,borderRadius:T.rad,padding:20,maxWidth:480,width:"100%",maxHeight:"85vh",overflowY:"auto",border:`1px solid ${T.border}`,boxShadow:"0 12px 40px rgba(0,0,0,0.6)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div>
+            <h3 style={{fontSize:16,fontWeight:600,color:T.text}}>Add Inventory Item</h3>
+            <span style={{fontSize:11,color:T.textMut}}>Saved immediately to Inventory</span>
+          </div>
+          <button onClick={onClose} disabled={saving} style={{background:"none",border:"none",cursor:saving?"not-allowed":"pointer",padding:4,opacity:saving?0.4:1}}>
+            <Icon name="x" size={20} color={T.textSec}/>
+          </button>
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div>
+            <span style={{fontSize:11,color:T.textMut,display:"block",marginBottom:4}}>Category</span>
+            <div style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",background:T.accentBg,border:`1px solid ${T.accentBorder}`,borderRadius:T.radSm,color:T.accent,fontSize:13,fontWeight:500}}>
+              <Icon name="package" size={12} color={T.accent}/> {lockedCategory || "—"}
+            </div>
+          </div>
+
+          <Field label="Name *">
+            <Input value={name} onChange={setName} placeholder="e.g., Brazil Cerrado AA" autoFocus/>
+          </Field>
+
+          <Field label="Abbreviation * (2-15 uppercase letters/digits)">
+            <Input
+              value={abbreviation}
+              onChange={v=>setAbbreviation(String(v).toUpperCase())}
+              placeholder="e.g., BRZAA"
+              style={abShowsError ? {border:`1px solid ${T.danger}`} : undefined}
+            />
+            {abShowsError && (
+              <div style={{marginTop:4,fontSize:11,color:T.danger}}>
+                Must be 2-15 characters, uppercase letters or digits only.
+              </div>
+            )}
+          </Field>
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+            <Field label="Unit">
+              <Input value={unit} onChange={setUnit} placeholder="kg"/>
+            </Field>
+            <Field label="Opening Stock">
+              <Input value={openingStock} onChange={setOpeningStock} placeholder="0" type="number"/>
+            </Field>
+            <Field label="Min Stock Alert">
+              <Input value={minStockAlert} onChange={setMinStockAlert} placeholder="0" type="number"/>
+            </Field>
+          </div>
+
+          {error && (
+            <div style={{background:T.dangerBg,border:"1px solid rgba(232,93,93,0.25)",borderRadius:T.radSm,padding:"10px 12px"}}>
+              <span style={{fontSize:12,color:T.danger}}>{error}</span>
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:8,marginTop:4}}>
+            <Btn variant="secondary" onClick={onClose} disabled={saving} style={{flex:1}}>
+              Cancel
+            </Btn>
+            <Btn variant="success" onClick={handleSubmit} disabled={!canSubmit} style={{flex:1}}>
+              <Icon name="plus" size={14} color={T.success}/> {saving?"Saving...":"Create & Select"}
+            </Btn>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
