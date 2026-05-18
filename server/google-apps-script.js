@@ -3468,7 +3468,7 @@ function buildLedgerBackedBreakdownByItem() {
       var refType = String(row.reference_type || "");
       var refId = String(row.reference_id || "");
       var ledgerClassId = String(row.classification_id || "");
-      if (refType === "checklist" && refId && ledgerClassId && classificationByUtId[refId]) {
+      if ((refType === "checklist" || refType === "untagged") && refId && ledgerClassId && classificationByUtId[refId]) {
         rdId = classificationByUtId[refId].roastDegreeId;
         gsId = classificationByUtId[refId].grindSizeId;
       }
