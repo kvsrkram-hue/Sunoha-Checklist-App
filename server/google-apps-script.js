@@ -3397,12 +3397,140 @@ function handleCreateInventoryCategory(body, user) {
   return obj;
 }
 
+// Ledger-backed per-item breakdown. Replaces buildUntaggedRemainingBreakdown
+// as the source for the per-item card sub-rows so the sub-row total reconciles
+// exactly to the top-line "available" (which itself comes from
+// computeLedgerTotalsByItem). Opening stock, manual adjustments (both old and
+// new variants), and OC-path submissions all flow through here as part of the
+// ledger sum — they fall into the "Unclassified" bucket because neither the
+// ledger row nor the source carries a (roast_degree, grind_size) tuple for
+// those origins. Classification metadata is borrowed from the source
+// UntaggedChecklists row only when the ledger row is "checklist"-origin AND
+// the source UT row is ck_roasted_beans or ck_grinding AND the ledger row
+// itself carries a non-empty classification_id (the second condition is the
+// spec's safety gate: even if a UT row has roast_degree set, we only attribute
+// it when the ledger write recorded a classification).
+//
+// JOIN KEY NOTE: the spec describes keying by UT auto_id, but
+// createInventoryTransaction is called everywhere with refId = ut.id (the
+// row id like "ut_xxx"), never the auto_id. See handleSubmitUntagged:2906
+// and handleAddStockAdjustmentAddition:4736 for examples. So we key the
+// lookup by ut.id and match against ledger.reference_id directly.
+//
+// Output shape (same as buildUntaggedRemainingBreakdown.byItem):
+//   { [itemId]: { remaining, entries: [{ autoId, remaining,
+//     roastDegreeId, roastDegreeLabel, grindSizeId, grindSizeLabel }] } }
+function buildLedgerBackedBreakdownByItem() {
+  // 1. Build classification lookup keyed by UT row id.
+  var utRows = getRows(SHEETS.UNTAGGED_CHECKLISTS);
+  var classificationByUtId = {};
+  for (var u = 0; u < utRows.length; u++) {
+    var ut = utRows[u];
+    if (isDeleted(ut)) continue;
+    var ckId = String(ut.checklist_id || "");
+    if (ckId !== "ck_roasted_beans" && ckId !== "ck_grinding") continue;
+    classificationByUtId[String(ut.id)] = {
+      roastDegreeId: String(ut.roast_degree_id || ""),
+      grindSizeId: String(ut.grind_size_id || ""),
+    };
+  }
+
+  // 2. Group ledger rows by item_id.
+  var ledger = getRows(SHEETS.INVENTORY_LEDGER);
+  var rowsByItem = {};
+  for (var r = 0; r < ledger.length; r++) {
+    var lr = ledger[r];
+    var iid = String(lr.item_id || "");
+    if (!iid) continue;
+    if (!rowsByItem[iid]) rowsByItem[iid] = [];
+    rowsByItem[iid].push(lr);
+  }
+
+  // 3. Per item, walk rows chronologically, accumulate per (roastDegreeId, grindSizeId) key.
+  var byItem = {};
+  for (var itemId in rowsByItem) {
+    var itemRows = rowsByItem[itemId];
+    itemRows.sort(function(a, b) {
+      var ca = String(a.created_at || ""); var cb = String(b.created_at || "");
+      return ca < cb ? -1 : ca > cb ? 1 : 0;
+    });
+
+    var buckets = {};
+    var totalNet = 0;
+    for (var i = 0; i < itemRows.length; i++) {
+      var row = itemRows[i];
+      var qty = parseFloat(row.quantity) || 0;
+      if (qty === 0) continue;
+      totalNet += qty;
+
+      var rdId = "";
+      var gsId = "";
+      var refType = String(row.reference_type || "");
+      var refId = String(row.reference_id || "");
+      var ledgerClassId = String(row.classification_id || "");
+      if (refType === "checklist" && refId && ledgerClassId && classificationByUtId[refId]) {
+        rdId = classificationByUtId[refId].roastDegreeId;
+        gsId = classificationByUtId[refId].grindSizeId;
+      }
+
+      var key = rdId + "||" + gsId;
+      if (!buckets[key]) buckets[key] = { roastDegreeId: rdId, grindSizeId: gsId, remaining: 0 };
+      buckets[key].remaining += qty;
+    }
+
+    totalNet = Math.round(totalNet * 100) / 100;
+    if (totalNet <= 0) continue;
+
+    // Emit entries with positive accumulator; drop empty/negative buckets.
+    var entries = [];
+    var emittedSum = 0;
+    for (var k in buckets) {
+      var b = buckets[k];
+      b.remaining = Math.round(b.remaining * 100) / 100;
+      if (b.remaining <= 0) continue;
+      entries.push({
+        autoId: "",
+        remaining: b.remaining,
+        roastDegreeId: b.roastDegreeId,
+        roastDegreeLabel: lookupClassificationLabel(b.roastDegreeId),
+        grindSizeId: b.grindSizeId,
+        grindSizeLabel: lookupClassificationLabel(b.grindSizeId),
+      });
+      emittedSum += b.remaining;
+    }
+    emittedSum = Math.round(emittedSum * 100) / 100;
+
+    // Sanity: emitted sub-rows should reconcile to the ledger net. A mismatch
+    // means a negative bucket was dropped — typically a classified IN later
+    // consumed by an unclassified OUT (rare today). Logged so admins can spot it.
+    if (Math.abs(emittedSum - totalNet) > 0.001) {
+      Logger.log("⚠ buildLedgerBackedBreakdownByItem: item " + itemId
+        + " sub-row sum " + emittedSum + " ≠ ledger net " + totalNet
+        + " (negative bucket dropped — likely classified IN followed by unclassified OUT)");
+    }
+
+    byItem[itemId] = { remaining: totalNet, entries: entries };
+  }
+
+  return byItem;
+}
+
 function handleGetInventoryItems() {
   ensureSheetHasAllColumns(SHEETS.INVENTORY_ITEMS);
   ensureSheetHasAllColumns(SHEETS.UNTAGGED_CHECKLISTS);
-  var breakdown = buildUntaggedRemainingBreakdown();
+  // Step 1b + per-item reconciliation: top-line "available" comes from the
+  // ledger (matches grey "Ledger: X" line) AND the classification sub-rows
+  // are now sourced from the same ledger via buildLedgerBackedBreakdownByItem,
+  // so the sub-row total reconciles to the top-line. Classification metadata
+  // is borrowed from source UntaggedChecklists rows where available; rows
+  // without classification (opening stock, manual adjustments, OC-path
+  // submissions, roast OUT consumption) fall into the Unclassified bucket.
+  // Field name `untaggedRemaining` is preserved for frontend prop compatibility
+  // even though it's now ledger-backed.
+  var ledgerTotals = computeLedgerTotalsByItem();
+  var breakdownByItem = buildLedgerBackedBreakdownByItem();
   return getRows(SHEETS.INVENTORY_ITEMS).map(function(r) {
-    var itemBreakdown = breakdown.byItem[r.id] || { remaining: 0, entries: [] };
+    var itemBreakdown = breakdownByItem[r.id] || { remaining: 0, entries: [] };
     // Group entries by (roastDegreeLabel | grindSizeLabel) combo
     var combos = {};
     for (var e = 0; e < itemBreakdown.entries.length; e++) {
@@ -3425,7 +3553,7 @@ function handleGetInventoryItems() {
       classificationLabel: lookupClassificationLabel(r.classification_id),
       abbreviation: String(r.abbreviation || "").toUpperCase(),
       equivalentItems: safeParseJSON(r.equivalent_items, []),
-      untaggedRemaining: Math.round(itemBreakdown.remaining * 100) / 100,
+      untaggedRemaining: ledgerTotals[r.id] || 0,
       classificationBreakdown: comboList,
     };
   });
@@ -3724,6 +3852,22 @@ function buildUntaggedRemainingBreakdown() {
     });
   }
   return { byItem: byItem, byCategory: byCategory };
+}
+
+// Sum signed quantity per item_id from InventoryLedger. Rows store quantity already
+// signed (IN positive, OUT negative — see createInventoryTransaction:3784), so we
+// just accumulate. Used by handleGetInventoryItems to populate the per-item
+// "available" figure from the same source as the grey "Ledger: X" line.
+function computeLedgerTotalsByItem() {
+  var rows = getRows(SHEETS.INVENTORY_LEDGER);
+  var totals = {};
+  for (var i = 0; i < rows.length; i++) {
+    var iid = String(rows[i].item_id || "");
+    if (!iid) continue;
+    totals[iid] = (totals[iid] || 0) + (parseFloat(rows[i].quantity) || 0);
+  }
+  for (var k in totals) totals[k] = Math.round(totals[k] * 100) / 100;
+  return totals;
 }
 
 function handleGetInventorySummary() {
