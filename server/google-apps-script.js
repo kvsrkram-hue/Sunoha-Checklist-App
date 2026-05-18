@@ -3583,7 +3583,11 @@ function handleCreateInventoryItem(body, user) {
     classification_id: body.classificationId || "",
   };
   appendToSheet(SHEETS.INVENTORY_ITEMS, obj);
-  // Create opening stock ledger entry if > 0
+  // Create opening stock ledger entry if > 0.
+  // Idea 2: capture per-transaction classification (roast_degree for Roasted Beans
+  // items, grind_size for Packing Items) so the per-item card surfaces the proper
+  // segregation instead of dumping opening stock into Unclassified. Optional —
+  // omitted/blank for categories that don't carry classification (Green Beans, Loss).
   if (openingStock > 0) {
     appendToSheet(SHEETS.INVENTORY_LEDGER, {
       id: "led_" + nextId(), item_id: id, item_name: body.name,
@@ -3592,6 +3596,7 @@ function handleCreateInventoryItem(body, user) {
       quantity: openingStock, balance_after: openingStock,
       reference_type: "manual", reference_id: "", notes: "Opening stock",
       done_by: user.displayName || user.username, created_at: new Date().toISOString(),
+      classification_id: body.openingClassificationId || "",
     });
   }
   writeAuditLog(user, "create", "InventoryItem", id, body.name);
@@ -3734,6 +3739,10 @@ function handleAddInventoryAdjustment(body, user) {
   updateSheetRow(SHEETS.INVENTORY_ITEMS, idx, item);
   invalidateCache(SHEETS.INVENTORY_ITEMS);
 
+  // Idea 2: prefer the per-adjustment classification when the caller sends one
+  // (Roasted Beans → roast_degree, Packing Items → grind_size). Falls back to
+  // the item's permanent classification_id for callers that don't supply one,
+  // preserving back-compat with any older request body.
   var ledgerEntry = {
     id: "led_" + nextId(), item_id: itemId, item_name: item.name,
     category: item.category || "",
@@ -3742,7 +3751,7 @@ function handleAddInventoryAdjustment(body, user) {
     reference_type: "manual", reference_id: "",
     notes: (adjType === "IN" ? "Addition" : "Reduction") + (body.notes ? ": " + body.notes : ""),
     done_by: user.displayName || user.username, created_at: new Date().toISOString(),
-    classification_id: item.classification_id || "",
+    classification_id: body.classificationId || item.classification_id || "",
   };
   appendToSheet(SHEETS.INVENTORY_LEDGER, ledgerEntry);
   writeAuditLog(user, "inventory_adjustment", "InventoryItem", itemId, adjType + " " + qty + " " + item.unit);

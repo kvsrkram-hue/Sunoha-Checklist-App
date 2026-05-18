@@ -6958,10 +6958,41 @@ function AddInventoryItemModal({ isOpen, onClose, lockedCategory, existingItems,
   );
 }
 
+// Idea 2: maps an InventoryItems category to the classification type that
+// applies to it. Returns null for categories that don't carry a per-transaction
+// classification (Green Beans, Loss, Others, admin-created custom).
+function classificationTypeForCategory(category) {
+  if (category === "Roasted Beans") return "roast_degree";
+  if (category === "Packing Items") return "grind_size";
+  return null;
+}
+
+// Idea 2: small picker used inside the Add Inventory Item form and the Adjust
+// modal. Renders a SearchableDropdown filtered to the requested classification
+// type, with a "— None —" first option so the user can deliberately skip it
+// (the entry then falls into Unclassified via the backend's || "" fallback).
+function ClassificationPicker({ type, value, onChange, classifications, label }) {
+  var list = (classifications && classifications[type]) || [];
+  var options = [{ label: "— None (Unclassified) —", value: "" }]
+    .concat(list.map(function(c) { return { label: c.name, value: c.id }; }));
+  return (
+    <Field label={label || (type === "roast_degree" ? "Roast Degree" : "Grind Size")}>
+      <SearchableDropdown options={options} value={value || ""} onChange={onChange} placeholder="— Select —"/>
+    </Field>
+  );
+}
+
 function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLedger, onCreateItem, onUpdateItem, onCreateCategory, onAdjust }) {
   const [activeTab,setActiveTab]=useState(categories[0]?.name||"Green Beans");
+  // Idea 2: classifications loaded on mount, mirroring the convention used by every
+  // other consumer in this file (QuickFillView, OrderDetailView, EditResponseView,
+  // ClassificationsSection, etc.). No App-level cache shared today.
+  const [classifications,setClassifications]=useState({roast_degree:[],grind_size:[]});
+  useEffect(()=>{
+    API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+  },[]);
   const [showAdd,setShowAdd]=useState(false);
-  const [newItem,setNewItem]=useState({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:""});
+  const [newItem,setNewItem]=useState({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:"",openingClassificationId:""});
   const [newCat,setNewCat]=useState("");
   const [editId,setEditId]=useState(null);
   const [editData,setEditData]=useState({});
@@ -6969,6 +7000,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
   const [adjType,setAdjType]=useState("addition");
   const [adjQty,setAdjQty]=useState("");
   const [adjNotes,setAdjNotes]=useState("");
+  const [adjClassificationId,setAdjClassificationId]=useState("");
   const [adjSaving,setAdjSaving]=useState(false);
   const [expandedBreakdown,setExpandedBreakdown]=useState({});
 
@@ -6985,7 +7017,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
     const ab=String(newItem.abbreviation||"").toUpperCase();
     if(!/^[A-Z0-9]{2,15}$/.test(ab)){addToast?.("Abbreviation must be 2-15 uppercase letters/digits","error");return;}
     onCreateItem({...newItem,abbreviation:ab,openingStock:parseFloat(newItem.openingStock)||0,minStockAlert:parseFloat(newItem.minStockAlert)||0});
-    setNewItem({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:""});setShowAdd(false);
+    setNewItem({name:"",category:"",unit:"kg",openingStock:"",minStockAlert:"",abbreviation:"",openingClassificationId:""});setShowAdd(false);
   };
 
   const handleUpdate=(id)=>{
@@ -7053,7 +7085,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
             <Input value={newItem.abbreviation} onChange={v=>setNewItem(p=>({...p,abbreviation:v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,15)}))} placeholder="e.g., ACAB" maxLength={15} style={{textTransform:"uppercase",fontFamily:T.mono}}/>
           </Field>
           <Field label="Category">
-            <select value={newItem.category} onChange={e=>setNewItem(p=>({...p,category:e.target.value}))}
+            <select value={newItem.category} onChange={e=>setNewItem(p=>({...p,category:e.target.value,openingClassificationId:""}))}
               style={{width:"100%",padding:"10px 14px",borderRadius:T.radSm,background:T.bg,border:`1px solid ${T.border}`,color:T.text,fontSize:14}}>
               <option value="">Select category</option>
               {categories.map(c=><option key={c.id} value={c.name}>{c.name}</option>)}
@@ -7068,6 +7100,19 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
             </Field>
             <Field label="Opening Stock"><Input value={newItem.openingStock} onChange={v=>setNewItem(p=>({...p,openingStock:v}))} type="number" placeholder="0"/></Field>
           </div>
+          {/* Idea 2: classification picker for opening stock — only renders when the
+              category carries classification AND user is actually seeding stock. */}
+          {(()=>{
+            var t = classificationTypeForCategory(newItem.category);
+            if (!t) return null;
+            if (!(parseFloat(newItem.openingStock) > 0)) return null;
+            return <ClassificationPicker
+              type={t}
+              value={newItem.openingClassificationId}
+              onChange={v=>setNewItem(p=>({...p,openingClassificationId:v}))}
+              classifications={classifications}
+              label={t === "roast_degree" ? "Roast Degree (for opening stock)" : "Grind Size (for opening stock)"}/>;
+          })()}
           <Field label="Min Stock Alert (optional)"><Input value={newItem.minStockAlert} onChange={v=>setNewItem(p=>({...p,minStockAlert:v}))} type="number" placeholder="Alert when below..."/></Field>
           <div style={{display:"flex",gap:8}}>
             <Btn variant="secondary" small onClick={()=>setShowAdd(false)} style={{flex:1}}>Cancel</Btn>
@@ -7121,7 +7166,7 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
                     <span style={{fontSize:10,color:T.textMut,display:"block",marginTop:2}}>Ledger: {item.currentStock}{item.unit}</span>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:4}}>
-                    {isAdmin&&onAdjust&&<button title="Add adjustment" onClick={e=>{e.stopPropagation();setAdjustItem(item);setAdjType("addition");setAdjQty("");setAdjNotes("")}} style={{background:"none",border:`1px solid ${T.border}`,cursor:"pointer",padding:"4px 8px",borderRadius:T.radSm,display:"flex",alignItems:"center",gap:4,color:T.textSec,fontSize:11}}>
+                    {isAdmin&&onAdjust&&<button title="Add adjustment" onClick={e=>{e.stopPropagation();setAdjustItem(item);setAdjType("addition");setAdjQty("");setAdjNotes("");setAdjClassificationId("")}} style={{background:"none",border:`1px solid ${T.border}`,cursor:"pointer",padding:"4px 8px",borderRadius:T.radSm,display:"flex",alignItems:"center",gap:4,color:T.textSec,fontSize:11}}>
                       <Icon name="plus" size={12} color={T.textSec}/> Adjust
                     </button>}
                     {isAdmin&&<button onClick={e=>{e.stopPropagation();setEditId(item.id);setEditData({name:item.name,unit:item.unit,minStockAlert:item.minStockAlert||"",abbreviation:item.abbreviation||"",equivalentItems:Array.isArray(item.equivalentItems)?item.equivalentItems:[]})}} style={{background:"none",border:"none",cursor:"pointer",padding:6}}>
@@ -7173,12 +7218,22 @@ function InventoryView({ items, categories, summary, isAdmin, addToast, onViewLe
               <Input value={adjQty} onChange={v=>{const n=parseFloat(v);setAdjQty(n<0?"0":v)}} type="number" min="0" placeholder="Enter positive quantity"/>
             </Field>
             <Field label="Notes (optional)"><Input value={adjNotes} onChange={v=>setAdjNotes(v)} placeholder="Reason for adjustment"/></Field>
+            {/* Idea 2: classification picker on adjustments — only for categories that carry one. */}
+            {(()=>{
+              var t = classificationTypeForCategory(adjustItem.category);
+              if (!t) return null;
+              return <ClassificationPicker
+                type={t}
+                value={adjClassificationId}
+                onChange={setAdjClassificationId}
+                classifications={classifications}/>;
+            })()}
             <div style={{display:"flex",gap:8}}>
               <Btn variant="secondary" small onClick={()=>setAdjustItem(null)} disabled={adjSaving} style={{flex:1}}>Cancel</Btn>
               <Btn small disabled={adjSaving||!adjQty||parseFloat(adjQty)<=0} onClick={async()=>{
                 const n=parseFloat(adjQty);if(isNaN(n)||n<=0){addToast?.("Quantity must be greater than 0","error");return;}
                 setAdjSaving(true);
-                try{await onAdjust({itemId:adjustItem.id,adjustmentType:adjType,quantity:n,notes:adjNotes});setAdjustItem(null)}catch{}
+                try{await onAdjust({itemId:adjustItem.id,adjustmentType:adjType,quantity:n,notes:adjNotes,classificationId:adjClassificationId});setAdjustItem(null)}catch{}
                 setAdjSaving(false);
               }} style={{flex:1}}>{adjSaving?"Saving...":"Save"}</Btn>
             </div>
@@ -7198,7 +7253,13 @@ function InventoryLedgerView({ item, isAdmin, addToast, onAdjust }) {
   const [adjType,setAdjType]=useState("addition");
   const [adjQty,setAdjQty]=useState("");
   const [adjNotes,setAdjNotes]=useState("");
+  const [adjClassificationId,setAdjClassificationId]=useState("");
   const [saving,setSaving]=useState(false);
+  // Idea 2: load classifications for the picker (matches the same convention as InventoryView).
+  const [classifications,setClassifications]=useState({roast_degree:[],grind_size:[]});
+  useEffect(()=>{
+    API.get("getClassifications").then(d=>{if(d&&!d.error)setClassifications(d)}).catch(()=>{});
+  },[]);
 
   useEffect(()=>{
     API.get("getInventoryLedger",{item_id:item.id}).then(data=>{setEntries(data||[]);setLoading(false)}).catch(()=>setLoading(false));
@@ -7213,11 +7274,11 @@ function InventoryLedgerView({ item, isAdmin, addToast, onAdjust }) {
     if(adjType==="reduction" && n===0) return;
     setSaving(true);
     try{
-      await onAdjust({itemId:item.id,adjustmentType:adjType,quantity:n,notes:adjNotes});
+      await onAdjust({itemId:item.id,adjustmentType:adjType,quantity:n,notes:adjNotes,classificationId:adjClassificationId});
       // Refresh ledger
       const data=await API.get("getInventoryLedger",{item_id:item.id});
       setEntries(data||[]);
-      setShowAdjust(false);setAdjQty("");setAdjNotes("");
+      setShowAdjust(false);setAdjQty("");setAdjNotes("");setAdjClassificationId("");
     }catch{}
     setSaving(false);
   };
@@ -7262,6 +7323,16 @@ function InventoryLedgerView({ item, isAdmin, addToast, onAdjust }) {
             )}
           </Field>
           <Field label="Reason / Notes"><Input value={adjNotes} onChange={setAdjNotes} placeholder="Why this adjustment?"/></Field>
+          {/* Idea 2: classification picker — only for categories that carry one. */}
+          {(()=>{
+            var t = classificationTypeForCategory(item.category);
+            if (!t) return null;
+            return <ClassificationPicker
+              type={t}
+              value={adjClassificationId}
+              onChange={setAdjClassificationId}
+              classifications={classifications}/>;
+          })()}
           <div style={{display:"flex",gap:8}}>
             <Btn variant="secondary" small onClick={()=>setShowAdjust(false)} style={{flex:1}}>Cancel</Btn>
             <Btn small onClick={handleAdjust} disabled={saving||adjQty===""||isNaN(parseFloat(adjQty))||(adjType==="addition"&&parseFloat(adjQty)<=0)||(adjType==="reduction"&&parseFloat(adjQty)===0)} style={{flex:1}}>{saving?"Saving...":"Save Adjustment"}</Btn>
